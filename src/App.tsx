@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 import "./App.css";
 
 const presets = [
@@ -42,85 +42,76 @@ const chatHistory = [
 
 function App() {
   const [preset, setPreset] = useState<(typeof presets)[number]["id"]>("balanced");
+  const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [activeHistory, setActiveHistory] = useState<(typeof chatHistory)[number]["id"]>(
     chatHistory[0].id,
   );
+  const [message, setMessage] = useState("");
+  const messageRef = useRef<HTMLTextAreaElement>(null);
+  const maxMessageLines = 10;
+  const lineHeight = 18;
+  const verticalPadding = 10;
+  const maxMessageHeight = lineHeight * maxMessageLines + verticalPadding;
 
   const selectedHistory = chatHistory.find((item) => item.id === activeHistory) ?? chatHistory[0];
 
+  useLayoutEffect(() => {
+    const textarea = messageRef.current;
+
+    if (!textarea) {
+      return;
+    }
+
+    textarea.style.height = "auto";
+    const nextHeight = Math.min(textarea.scrollHeight, maxMessageHeight);
+    textarea.style.height = `${nextHeight}px`;
+    textarea.style.overflowY = textarea.scrollHeight > maxMessageHeight ? "auto" : "hidden";
+  }, [message, maxMessageHeight]);
+
   return (
-    <main className="app-shell">
+    <main className={`app-shell theme-${theme}`}>
       <aside className="sidebar">
         <div className="sidebar-header">
-          <p className="eyebrow">History</p>
           <h2>Recent chats</h2>
         </div>
 
-        <section className="history-card compact-card">
-          <div className="status-row">
-            <span className="status-dot" />
-            <span>Pull up previous chats</span>
-          </div>
-          <div className="history-list" role="list" aria-label="Previous chat history">
-            {chatHistory.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                className={item.id === activeHistory ? "history-item active" : "history-item"}
-                onClick={() => setActiveHistory(item.id)}
-                aria-pressed={item.id === activeHistory}
-              >
-                <span className="history-item-top">
-                  <strong>{item.title}</strong>
-                  <span>{item.time}</span>
-                </span>
-                <span className="history-snippet">{item.snippet}</span>
-              </button>
-            ))}
-          </div>
-        </section>
+        <div className="history-list" role="list" aria-label="Previous chat history">
+          {chatHistory.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              className={item.id === activeHistory ? "history-item active" : "history-item"}
+              onClick={() => setActiveHistory(item.id)}
+              aria-pressed={item.id === activeHistory}
+            >
+              <span className="history-item-title">{item.title}</span>
+            </button>
+          ))}
+        </div>
       </aside>
 
       <section className="workspace">
-        <header className="topbar">
-          <div className="preset-selector" role="tablist" aria-label="Model preset selector">
-            {presets.map((option) => (
-              <button
-                key={option.id}
-                type="button"
-                className={option.id === preset ? "preset-button active" : "preset-button"}
-                onClick={() => setPreset(option.id)}
-                aria-pressed={option.id === preset}
-              >
-                <span>{option.label}</span>
-              </button>
-            ))}
-          </div>
-          <div className="local-badge">
-            <span className="status-dot" />
-            <span>Processing stays local</span>
-          </div>
+        <header className="workspace-header">
+          <button
+            type="button"
+            className="theme-toggle"
+            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+            aria-pressed={theme === "light"}
+            aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+          >
+            {theme === "dark" ? "Light" : "Dark"}
+          </button>
         </header>
 
         <section className="card chat-canvas">
           <div className="canvas-greeting">
-            <p className="section-label">Desktop Spotlight AI</p>
             <h3>Hi, what can I help with today?</h3>
-            <p>
-              Drop a file anywhere in the app, pick a preset, and ask a question. Previous chats
-              stay in the sidebar.
-            </p>
+            <p>Drop a file anywhere in the app, pick a preset, and ask a question.</p>
           </div>
 
-          <div className="active-thread-bar">
-            <span className="section-label">Active chat</span>
-            <strong>{selectedHistory.title}</strong>
-            <p>{selectedHistory.snippet}</p>
-          </div>
-
-          <div className="response-panel compact-response">
-            <p className="response-empty">Responses from Ollama will appear here.</p>
-            <p className="response-note">Loading, error, and success states will follow.</p>
+          <div className="response-panel compact-response slim-response">
+            <p className="response-empty">{selectedHistory.title}</p>
+            <p className="response-note">Responses from Ollama will appear here.</p>
           </div>
 
           <div className="composer-shell" aria-label="Message composer">
@@ -128,12 +119,27 @@ function App() {
               +
             </button>
             <textarea
-              className="prompt-box prompt-box-chatgpt"
+              ref={messageRef}
+              className="prompt-box"
               placeholder="Message Desktop Spotlight AI"
-              rows={2}
+              rows={1}
+              value={message}
+              onChange={(event) => setMessage(event.currentTarget.value)}
             />
-            <button type="button" className="primary-button send-button">
-              Send
+            <button
+              type="button"
+              className="preset-pill-button"
+              aria-label={`Current preset ${preset}`}
+              onClick={() => {
+                const currentIndex = presets.findIndex((option) => option.id === preset);
+                const nextPreset = presets[(currentIndex + 1) % presets.length];
+                setPreset(nextPreset.id);
+              }}
+            >
+              {presets.find((option) => option.id === preset)?.label}
+            </button>
+            <button type="button" className="primary-button send-button" aria-label="Send">
+              <span>➤</span>
             </button>
           </div>
         </section>
