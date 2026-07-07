@@ -1,16 +1,10 @@
-import { type DragEvent, type KeyboardEvent, useLayoutEffect, useRef, useState } from "react";
+import { type DragEvent, type KeyboardEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 import "./App.css";
 
 const presets = [
   { id: "lite", label: "Lite", description: "Fast answers for smaller files and quick summaries." },
   { id: "balanced", label: "Balanced", description: "Default mix of speed and reasoning depth." },
   { id: "pro", label: "Pro", description: "Best for longer prompts and more careful analysis." },
-] as const;
-
-const chatHistory = [
-  { id: "readme-notes", title: "README notes" },
-  { id: "lesson-plan", title: "Lesson plan" },
-  { id: "quick-review", title: "Quick review" },
 ] as const;
 
 type AttachedFile = {
@@ -26,12 +20,59 @@ type ChatTurn = {
   id: string;
   role: "user" | "assistant";
   content: string;
+  files?: AttachedFile[];
 };
 
+type ChatSession = {
+  id: string;
+  title: string;
+  turns: ChatTurn[];
+  createdAt: number;
+  updatedAt: number;
+};
+
+const storageKey = "desktop-spotlight-ai-chats";
 const maxMessageLines = 10;
 const lineHeight = 18;
 const verticalPadding = 10;
 const maxMessageHeight = lineHeight * maxMessageLines + verticalPadding;
+
+function createSession(title = "New chat"): ChatSession {
+  const now = Date.now();
+
+  return {
+    id: `chat-${now}-${Math.random().toString(16).slice(2)}`,
+    title,
+    turns: [],
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function getInitialSessions(): ChatSession[] {
+  const fallback = [createSession("README notes"), createSession("Lesson plan"), createSession("Quick review")];
+
+  try {
+    const stored = localStorage.getItem(storageKey);
+    if (!stored) return fallback;
+
+    const parsed = JSON.parse(stored) as ChatSession[];
+    if (!Array.isArray(parsed) || parsed.length === 0) return fallback;
+
+    return parsed;
+  } catch {
+    return fallback;
+  }
+}
+
+function getInitialAppState() {
+  const sessions = getInitialSessions();
+
+  return {
+    sessions,
+    activeSessionId: sessions[0].id,
+  };
+}
 
 function formatFileSize(size: number) {
   if (size < 1024) return `${size} B`;
@@ -71,21 +112,57 @@ async function summarizeFile(file: File): Promise<AttachedFile> {
 }
 
 function App() {
+  const initialStateRef = useRef(getInitialAppState());
+
   const [preset, setPreset] = useState<(typeof presets)[number]["id"]>("balanced");
   const [theme, setTheme] = useState<"dark" | "light">("dark");
-  const [activeHistory, setActiveHistory] = useState<(typeof chatHistory)[number]["id"]>(chatHistory[0].id);
+  const [sessions, setSessions] = useState<ChatSession[]>(initialStateRef.current.sessions);
+  const [activeSessionId, setActiveSessionId] = useState(initialStateRef.current.activeSessionId);
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
-  const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [message, setMessage] = useState("");
   const [isDragging, setIsDragging] = useState(false);
+  const [menuSessionId, setMenuSessionId] = useState<string | null>(null);
+  const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
+  const [draftTitle, setDraftTitle] = useState("");
 
   const messageRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const dragDepthRef = useRef(0);
 
-  const selectedHistory = chatHistory.find((item) => item.id === activeHistory) ?? chatHistory[0];
+  const activeSession = sessions.find((item) => item.id === activeSessionId) ?? sessions[0];
   const selectedPreset = presets.find((item) => item.id === preset) ?? presets[1];
   const canSend = message.trim().length > 0 || attachedFiles.length > 0;
+
+  useEffect(() => {
+    localStorage.setItem(storageKey, JSON.stringify(sessions));
+  }, [sessions]);
+
+  useEffect(() => {
+    if (!sessions.some((session) => session.id === activeSessionId) && sessions[0]) {
+      setActiveSessionId(sessions[0].id);
+    }
+  }, [activeSessionId, sessions]);
+
+  useEffect(() => {
+    function closeMenu() {
+      setMenuSessionId(null);
+    }
+
+    function handleEscape(event: globalThis.KeyboardEvent) {
+      if (event.key === "Escape") {
+        setMenuSessionId(null);
+        setEditingSessionId(null);
+      }
+    }
+
+    window.addEventListener("click", closeMenu);
+    window.addEventListener("keydown", handleEscape);
+
+    return () => {
+      window.removeEventListener("click", closeMenu);
+      window.removeEventListener("keydown", handleEscape);
+    };
+  }, []);
 
   useLayoutEffect(() => {
     const textarea = messageRef.current;
@@ -105,6 +182,82 @@ function App() {
     setAttachedFiles((current) => [...current, ...nextFiles]);
   }
 
+  function createNewChat() {
+    const nextSession = createSession();
+
+    setSessions((current) => [nextSession, ...current]);
+    setActiveSessionId(nextSession.id);
+    setAttachedFiles([]);
+    setMessage("");
+    setMenuSessionId(null);
+    setEditingSessionId(null);
+  }
+
+  function startRename(sessionId: string) {
+    const session = sessions.find((item) => item.id === sessionId);
+    if (!session) return;
+
+    setDraftTitle(session.title);
+    setEditingSessionId(sessionId);
+    setMenuSessionId(null);
+  }
+
+  function commitRename() {
+    const nextTitle = draftTitle.trim();
+
+    if (!editingSessionId || !nextTitle) {
+      setEditingSessionId(null);
+      return;
+    }
+
+    setSessions((current) =>
+      current.map((item) =>
+        item.id === editingSessionId ? { ...item, title: nextTitle, updatedAt: Date.now() } : item,
+      ),
+    );
+
+    setEditingSessionId(null);
+  }
+
+  function duplicateSession(sessionId: string) {
+    const session = sessions.find((item) => item.id === sessionId);
+    if (!session) return;
+
+    const now = Date.now();
+    const copy: ChatSession = {
+      ...session,
+      id: `chat-${now}-${Math.random().toString(16).slice(2)}`,
+      title: `${session.title} copy`,
+      createdAt: now,
+      updatedAt: now,
+    };
+
+    setSessions((current) => [copy, ...current]);
+    setActiveSessionId(copy.id);
+    setMenuSessionId(null);
+  }
+
+ function deleteSession(sessionId: string) {
+  const nextSessions = sessions.filter((item) => item.id !== sessionId);
+
+  if (nextSessions.length === 0) {
+    const nextSession = createSession();
+    setSessions([nextSession]);
+    setActiveSessionId(nextSession.id);
+  } else {
+    setSessions(nextSessions);
+
+    if (activeSessionId === sessionId) {
+      setActiveSessionId(nextSessions[0].id);
+    }
+  }
+
+  setAttachedFiles([]);
+  setMessage("");
+  setMenuSessionId(null);
+  setEditingSessionId(null);
+}
+
   function cyclePreset() {
     const currentIndex = presets.findIndex((option) => option.id === preset);
     const nextPreset = presets[(currentIndex + 1) % presets.length];
@@ -119,14 +272,18 @@ function App() {
     const trimmedMessage = message.trim();
     if (!trimmedMessage && attachedFiles.length === 0) return;
 
+    const filesForTurn = attachedFiles;
+    const titleFromMessage = trimmedMessage.slice(0, 42);
+
     const userTurn: ChatTurn = {
       id: `user-${Date.now()}`,
       role: "user",
-      content: trimmedMessage || `Attached ${attachedFiles.length} file(s).`,
+      content: trimmedMessage || `Attached ${filesForTurn.length} file(s).`,
+      files: filesForTurn,
     };
 
-    const fileSummary = attachedFiles.length
-      ? `I received ${attachedFiles.length} file(s): ${attachedFiles.map((item) => item.name).join(", ")}.`
+    const fileSummary = filesForTurn.length
+      ? `I received ${filesForTurn.length} file(s): ${filesForTurn.map((item) => item.name).join(", ")}.`
       : "No files were attached.";
 
     const assistantTurn: ChatTurn = {
@@ -135,7 +292,19 @@ function App() {
       content: `Placeholder response in ${selectedPreset.label} mode. ${fileSummary} Ollama integration is the next step.`,
     };
 
-    setTurns((current) => [...current, userTurn, assistantTurn]);
+    setSessions((current) =>
+      current.map((session) => {
+        if (session.id !== activeSession.id) return session;
+
+        return {
+          ...session,
+          title: session.title === "New chat" && titleFromMessage ? titleFromMessage : session.title,
+          turns: [...session.turns, userTurn, assistantTurn],
+          updatedAt: Date.now(),
+        };
+      }),
+    );
+
     setMessage("");
     setAttachedFiles([]);
 
@@ -186,19 +355,98 @@ function App() {
       <aside className="sidebar">
         <div className="sidebar-header">
           <h2>Recent chats</h2>
+          <button type="button" className="sidebar-new-button" onClick={createNewChat} aria-label="New chat">
+            +
+          </button>
         </div>
 
         <div className="history-list" role="list" aria-label="Previous chat history">
-          {chatHistory.map((item) => (
-            <button
+          {sessions.map((item) => (
+            <div
               key={item.id}
-              type="button"
-              className={item.id === activeHistory ? "history-item active" : "history-item"}
-              onClick={() => setActiveHistory(item.id)}
-              aria-pressed={item.id === activeHistory}
+              className={item.id === activeSession.id ? "history-item-shell active" : "history-item-shell"}
+              onContextMenu={(event) => {
+                event.preventDefault();
+                setMenuSessionId(item.id);
+              }}
             >
-              <span className="history-item-title">{item.title}</span>
-            </button>
+              {editingSessionId === item.id ? (
+                <input
+                  className="history-rename-input"
+                  value={draftTitle}
+                  autoFocus
+                  onClick={(event) => event.stopPropagation()}
+                  onChange={(event) => setDraftTitle(event.currentTarget.value)}
+                  onBlur={commitRename}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") commitRename();
+                    if (event.key === "Escape") setEditingSessionId(null);
+                  }}
+                />
+              ) : (
+                <button
+                  type="button"
+                  className="history-item"
+                  onClick={() => {
+                    setActiveSessionId(item.id);
+                    setMenuSessionId(null);
+                  }}
+                  onDoubleClick={() => startRename(item.id)}
+                  aria-pressed={item.id === activeSession.id}
+                >
+                  <span className="history-item-title">{item.title}</span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                className="history-options-button"
+                aria-label={`More options for ${item.title}`}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  setMenuSessionId((current) => (current === item.id ? null : item.id));
+                }}
+              >
+                ⋯
+              </button>
+
+              {menuSessionId === item.id ? (
+  <div className="history-menu" role="menu" onMouseDown={(event) => event.stopPropagation()}>
+    <button
+      type="button"
+      className="history-menu-item"
+      onMouseDown={(event) => {
+        event.preventDefault();
+        startRename(item.id);
+      }}
+    >
+      Rename
+    </button>
+
+    <button
+      type="button"
+      className="history-menu-item"
+      onMouseDown={(event) => {
+        event.preventDefault();
+        duplicateSession(item.id);
+      }}
+    >
+      Duplicate
+    </button>
+
+    <button
+      type="button"
+      className="history-menu-item danger"
+      onMouseDown={(event) => {
+        event.preventDefault();
+        deleteSession(item.id);
+      }}
+    >
+      Delete
+    </button>
+  </div>
+) : null}
+            </div>
           ))}
         </div>
       </aside>
@@ -236,78 +484,84 @@ function App() {
           </div>
 
           <div className="response-panel compact-response slim-response">
-            <div className="response-section">
-              <div className="response-section-title">Attached files</div>
-
-              {attachedFiles.length ? (
-                <div className="attachment-list">
-                  {attachedFiles.map((item) => (
-                    <div key={item.id} className="attachment-item">
-                      <strong>{item.name}</strong>
-                      <span>
-                        {item.typeLabel} · {item.sizeLabel}
-                      </span>
-                      <p>{item.preview}</p>
-                    </div>
-                  ))}
-                </div>
-              ) : (
-                <p className="response-note">Choose or drop TXT/Markdown files anywhere in the app.</p>
-              )}
-            </div>
-
             <div className="response-section response-log-shell">
               <div className="response-section-title">Messages</div>
-              <p className="response-note">Active chat: {selectedHistory.title}</p>
+              <p className="response-note">Active chat: {activeSession.title}</p>
 
               <div className="response-log">
-                {turns.length ? (
-                  turns.map((turn) => (
+                {activeSession.turns.length ? (
+                  activeSession.turns.map((turn) => (
                     <div key={turn.id} className={`turn turn-${turn.role}`}>
+                      {turn.files?.length ? (
+                        <div className="message-attachments">
+                          {turn.files.map((file) => (
+                            <div key={file.id} className="message-attachment">
+                              <strong>{file.name}</strong>
+                              <span>
+                                {file.typeLabel} · {file.sizeLabel}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      ) : null}
+
                       <p>{turn.content}</p>
                     </div>
                   ))
                 ) : (
-                  <p className="response-empty">Your first send will create a placeholder Ollama response.</p>
+                  <p className="response-empty">Your first send will create a placeholder response.</p>
                 )}
               </div>
             </div>
           </div>
 
-          <div className="composer-shell" aria-label="Message composer">
-            <button type="button" className="attach-button" aria-label="Attach file" onClick={openFilePicker}>
-              +
-            </button>
+          <div className="composer-stack">
+            {attachedFiles.length ? (
+              <div className="pending-attachments" aria-label="Files ready to send">
+                {attachedFiles.map((file) => (
+                  <div key={file.id} className="pending-attachment">
+                    <strong>{file.name}</strong>
+                    <span>{file.sizeLabel}</span>
+                  </div>
+                ))}
+              </div>
+            ) : null}
 
-            <textarea
-              ref={messageRef}
-              className="prompt-box"
-              placeholder="Message Desktop Spotlight AI"
-              rows={1}
-              value={message}
-              onChange={(event) => setMessage(event.currentTarget.value)}
-              onKeyDown={handleKeyDown}
-            />
+            <div className="composer-shell" aria-label="Message composer">
+              <button type="button" className="attach-button" aria-label="Attach file" onClick={openFilePicker}>
+                +
+              </button>
 
-            <button
-              type="button"
-              className="preset-pill-button"
-              aria-label={`Current preset ${selectedPreset.label}`}
-              title={selectedPreset.description}
-              onClick={cyclePreset}
-            >
-              {selectedPreset.label}
-            </button>
+              <textarea
+                ref={messageRef}
+                className="prompt-box"
+                placeholder="Message Desktop Spotlight AI"
+                rows={1}
+                value={message}
+                onChange={(event) => setMessage(event.currentTarget.value)}
+                onKeyDown={handleKeyDown}
+              />
 
-            <button
-              type="button"
-              className="primary-button send-button"
-              aria-label="Send"
-              disabled={!canSend}
-              onClick={() => void sendMessage()}
-            >
-              <span>➤</span>
-            </button>
+              <button
+                type="button"
+                className="preset-pill-button"
+                aria-label={`Current preset ${selectedPreset.label}`}
+                title={selectedPreset.description}
+                onClick={cyclePreset}
+              >
+                {selectedPreset.label}
+              </button>
+
+              <button
+                type="button"
+                className="primary-button send-button"
+                aria-label="Send"
+                disabled={!canSend}
+                onClick={() => void sendMessage()}
+              >
+                <span>➤</span>
+              </button>
+            </div>
           </div>
         </section>
       </section>
