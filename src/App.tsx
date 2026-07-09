@@ -137,6 +137,7 @@ function App() {
 
   const [preset, setPreset] = useState<(typeof presets)[number]["id"]>("balanced");
   const [theme, setTheme] = useState<"dark" | "light">("dark");
+  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [sessions, setSessions] = useState<ChatSession[]>(initialStateRef.current.sessions);
   const [activeSessionId, setActiveSessionId] = useState(initialStateRef.current.activeSessionId);
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>(getInitialAttachedFiles());
@@ -386,7 +387,7 @@ function App() {
 
   return (
     <main
-      className={`app-shell theme-${theme}${isDragging ? " dragging" : ""}`}
+      className={`app-shell theme-${theme}${isDragging ? " dragging" : ""}${isSidebarOpen ? "" : " sidebar-collapsed"}`}
       onDragEnter={handleDragEnter}
       onDragOver={handleDragOver}
       onDragLeave={handleDragLeave}
@@ -400,12 +401,35 @@ function App() {
           </div>
         </div>
       ) : null}
-      <aside className="sidebar">
+      <aside className={`sidebar${isSidebarOpen ? "" : " sidebar-collapsed"}`}>
         <div className="sidebar-header">
-          <h2>Recent chats</h2>
-          <button type="button" className="sidebar-new-button" onClick={createNewChat} aria-label="New chat">
-            +
-          </button>
+          <div className="sidebar-title-shell">
+            <h2>Recent chats</h2>
+            <span className="sidebar-subtitle">Pick a session or collapse for a cleaner workspace.</span>
+          </div>
+
+          <div className="sidebar-header-actions">
+            <button
+              type="button"
+              className="sidebar-new-button"
+              onClick={createNewChat}
+              aria-label="Start a new chat"
+            >
+              +
+            </button>
+
+            <button
+              type="button"
+              className="sidebar-toggle-button"
+              onClick={() => setIsSidebarOpen((current) => !current)}
+              aria-label={isSidebarOpen ? "Collapse sidebar" : "Expand sidebar"}
+              aria-expanded={isSidebarOpen}
+            >
+              <span className="sidebar-toggle-icon" aria-hidden="true">
+                {isSidebarOpen ? "<" : ">"}
+              </span>
+            </button>
+          </div>
         </div>
 
         <div className="history-list" role="list" aria-label="Previous chat history">
@@ -537,6 +561,8 @@ function App() {
               </button>
             </div>
 
+            <div className="file-preview-status">File attached and ready. Remove or clear this file to change it.</div>
+
             <div className="file-preview-grid">
               {attachedFiles.map((file) => (
                 <div key={file.id} className="file-preview-card">
@@ -561,10 +587,15 @@ function App() {
           </section>
         ) : null}
 
-        <section className="card chat-canvas">
+        <section className="card chat-panel chat-canvas">
           <div className="canvas-greeting">
             <h3>Hi, what can I help with today?</h3>
             <p>Drop a file anywhere in the app, pick a preset, and ask a question.</p>
+          </div>
+
+          <div className="panel-title-shell">
+            <div className="panel-title">Conversation</div>
+            <div className="panel-subtitle">Messages and assistant replies</div>
           </div>
 
           <div className="response-panel compact-response slim-response">
