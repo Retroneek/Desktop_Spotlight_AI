@@ -268,17 +268,32 @@ function App() {
     fileInputRef.current?.click();
   }
 
-  async function sendMessage() {
+  function removeFile(fileId: string) {
+    setAttachedFiles((current) => current.filter((file) => file.id !== fileId));
+  }
+
+  const outgoingPreview = attachedFiles.length
+    ? `${message.trim() || "(no prompt)"}\n\nAttached file(s): ${attachedFiles.map((file) => file.name).join(", ")}\n\n${attachedFiles
+        .map((file) => `${file.name}: ${file.preview || "(no preview available)"}`)
+        .join("\n\n")}`
+    : message.trim();
+
+  async function sendMessage(summarize = false) {
     const trimmedMessage = message.trim();
     if (!trimmedMessage && attachedFiles.length === 0) return;
 
     const filesForTurn = attachedFiles;
     const titleFromMessage = trimmedMessage.slice(0, 42);
+    const content = summarize
+      ? trimmedMessage
+        ? `Please summarize the attached file(s) and answer: ${trimmedMessage}`
+        : `Please summarize the attached file(s).`
+      : trimmedMessage || `Attached ${filesForTurn.length} file(s).`;
 
     const userTurn: ChatTurn = {
       id: `user-${Date.now()}`,
       role: "user",
-      content: trimmedMessage || `Attached ${filesForTurn.length} file(s).`,
+      content,
       files: filesForTurn,
     };
 
@@ -483,6 +498,42 @@ function App() {
             <p>Drop a file anywhere in the app, pick a preset, and ask a question.</p>
           </div>
 
+          {attachedFiles.length ? (
+            <section className="card file-preview-panel" aria-label="File preview panel">
+              <div className="file-preview-header">
+                <div>
+                  <div className="file-preview-title">File preview</div>
+                  <div className="file-preview-subtitle">Review the selected file and what will be sent to the model.</div>
+                </div>
+                <button type="button" className="clear-files-button" onClick={() => setAttachedFiles([])}>
+                  Clear files
+                </button>
+              </div>
+
+              <div className="file-preview-grid">
+                {attachedFiles.map((file) => (
+                  <div key={file.id} className="file-preview-card">
+                    <div className="file-preview-card-header">
+                      <strong>{file.name}</strong>
+                      <button type="button" className="remove-file-button" onClick={() => removeFile(file.id)}>
+                        Remove
+                      </button>
+                    </div>
+                    <span className="file-preview-meta">{file.typeLabel} · {file.sizeLabel}</span>
+                    <div className="file-preview-text">
+                      {file.supported ? file.preview : "Preview unavailable for this file type."}
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              <div className="outgoing-preview">
+                <div className="preview-label">What will be sent to the model</div>
+                <pre>{outgoingPreview}</pre>
+              </div>
+            </section>
+          ) : null}
+
           <div className="response-panel compact-response slim-response">
             <div className="response-section response-log-shell">
               <div className="response-section-title">Messages</div>
@@ -554,12 +605,22 @@ function App() {
 
               <button
                 type="button"
+                className="secondary-button summarize-button"
+                aria-label="Summarize"
+                disabled={!canSend}
+                onClick={() => void sendMessage(true)}
+              >
+                Summarize
+              </button>
+
+              <button
+                type="button"
                 className="primary-button send-button"
                 aria-label="Send"
                 disabled={!canSend}
                 onClick={() => void sendMessage()}
               >
-                <span>➤</span>
+                Send
               </button>
             </div>
           </div>
