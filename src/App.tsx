@@ -32,6 +32,7 @@ type ChatSession = {
 };
 
 const storageKey = "desktop-spotlight-ai-chats";
+const attachmentStorageKey = "desktop-spotlight-ai-attached-files";
 const maxMessageLines = 10;
 const lineHeight = 18;
 const verticalPadding = 10;
@@ -62,6 +63,26 @@ function getInitialSessions(): ChatSession[] {
     return parsed;
   } catch {
     return fallback;
+  }
+}
+
+function getInitialAttachedFiles(): AttachedFile[] {
+  try {
+    const saved = localStorage.getItem(attachmentStorageKey);
+    if (!saved) return [];
+
+    const parsed = JSON.parse(saved) as AttachedFile[];
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed.map((item) => ({
+      ...item,
+      preview: typeof item.preview === "string" ? item.preview : "",
+      typeLabel: typeof item.typeLabel === "string" ? item.typeLabel : "file",
+      sizeLabel: typeof item.sizeLabel === "string" ? item.sizeLabel : "0 B",
+      supported: Boolean(item.supported),
+    }));
+  } catch {
+    return [];
   }
 }
 
@@ -118,7 +139,7 @@ function App() {
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [sessions, setSessions] = useState<ChatSession[]>(initialStateRef.current.sessions);
   const [activeSessionId, setActiveSessionId] = useState(initialStateRef.current.activeSessionId);
-  const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>([]);
+  const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>(getInitialAttachedFiles());
   const [message, setMessage] = useState("");
   const [isDragging, setIsDragging] = useState(false);
   const [menuSessionId, setMenuSessionId] = useState<string | null>(null);
@@ -136,6 +157,10 @@ function App() {
   useEffect(() => {
     localStorage.setItem(storageKey, JSON.stringify(sessions));
   }, [sessions]);
+
+  useEffect(() => {
+    localStorage.setItem(attachmentStorageKey, JSON.stringify(attachedFiles));
+  }, [attachedFiles]);
 
   useEffect(() => {
     if (!sessions.some((session) => session.id === activeSessionId) && sessions[0]) {
@@ -367,6 +392,14 @@ function App() {
       onDragLeave={handleDragLeave}
       onDrop={handleDrop}
     >
+      {isDragging ? (
+        <div className="drag-overlay" aria-hidden="true">
+          <div className="drag-overlay-panel">
+            <strong>Drop file here</strong>
+            <span>Release to attach your file</span>
+          </div>
+        </div>
+      ) : null}
       <aside className="sidebar">
         <div className="sidebar-header">
           <h2>Recent chats</h2>
@@ -492,47 +525,47 @@ function App() {
           />
         </header>
 
+        {attachedFiles.length ? (
+          <section className="file-preview-panel" aria-label="File preview panel">
+            <div className="file-preview-header">
+              <div>
+                <div className="file-preview-title">File preview</div>
+                <div className="file-preview-subtitle">Review the selected file and what will be sent to the model.</div>
+              </div>
+              <button type="button" className="clear-files-button" onClick={() => setAttachedFiles([])}>
+                Clear files
+              </button>
+            </div>
+
+            <div className="file-preview-grid">
+              {attachedFiles.map((file) => (
+                <div key={file.id} className="file-preview-card">
+                  <div className="file-preview-card-header">
+                    <strong>{file.name}</strong>
+                    <button type="button" className="remove-file-button" onClick={() => removeFile(file.id)}>
+                      Remove
+                    </button>
+                  </div>
+                  <span className="file-preview-meta">{file.typeLabel} · {file.sizeLabel}</span>
+                  <div className="file-preview-text">
+                    {file.supported ? file.preview : "Preview unavailable for this file type."}
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            <div className="outgoing-preview">
+              <div className="preview-label">What will be sent to the model</div>
+              <pre>{outgoingPreview}</pre>
+            </div>
+          </section>
+        ) : null}
+
         <section className="card chat-canvas">
           <div className="canvas-greeting">
             <h3>Hi, what can I help with today?</h3>
             <p>Drop a file anywhere in the app, pick a preset, and ask a question.</p>
           </div>
-
-          {attachedFiles.length ? (
-            <section className="card file-preview-panel" aria-label="File preview panel">
-              <div className="file-preview-header">
-                <div>
-                  <div className="file-preview-title">File preview</div>
-                  <div className="file-preview-subtitle">Review the selected file and what will be sent to the model.</div>
-                </div>
-                <button type="button" className="clear-files-button" onClick={() => setAttachedFiles([])}>
-                  Clear files
-                </button>
-              </div>
-
-              <div className="file-preview-grid">
-                {attachedFiles.map((file) => (
-                  <div key={file.id} className="file-preview-card">
-                    <div className="file-preview-card-header">
-                      <strong>{file.name}</strong>
-                      <button type="button" className="remove-file-button" onClick={() => removeFile(file.id)}>
-                        Remove
-                      </button>
-                    </div>
-                    <span className="file-preview-meta">{file.typeLabel} · {file.sizeLabel}</span>
-                    <div className="file-preview-text">
-                      {file.supported ? file.preview : "Preview unavailable for this file type."}
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              <div className="outgoing-preview">
-                <div className="preview-label">What will be sent to the model</div>
-                <pre>{outgoingPreview}</pre>
-              </div>
-            </section>
-          ) : null}
 
           <div className="response-panel compact-response slim-response">
             <div className="response-section response-log-shell">

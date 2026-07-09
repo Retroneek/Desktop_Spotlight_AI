@@ -106,7 +106,7 @@ button:not(:disabled):active {
   --accent-soft: rgba(138, 180, 248, 0.36);
   --send-bg: #e3e3e3;
   --send-text: #1f1f1f;
-
+ 
   width: 100%;
   min-width: 0;
   height: 100dvh;
@@ -114,6 +114,7 @@ button:not(:disabled):active {
   display: grid;
   grid-template-columns: clamp(180px, 18vw, 220px) minmax(0, 1fr);
   overflow: hidden;
+  position: relative;
   color: var(--text);
   background: radial-gradient(circle at top left, #1f2432 0%, #131314 30%, #0f1115 100%);
   background-image:
@@ -362,13 +363,45 @@ button:not(:disabled):active {
   border-color: var(--accent);
 }
 
+.drag-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  background: rgba(17, 25, 43, 0.76);
+  backdrop-filter: blur(8px);
+}
+
+.drag-overlay-panel {
+  display: grid;
+  gap: 6px;
+  padding: 24px 28px;
+  border-radius: 24px;
+  background: rgba(30, 35, 52, 0.96);
+  border: 1px solid rgba(138, 180, 248, 0.26);
+  box-shadow: 0 28px 80px rgba(0, 0, 0, 0.35);
+  text-align: center;
+}
+
+.drag-overlay-panel strong {
+  color: #ffffff;
+  font-size: 1.15rem;
+}
+
+.drag-overlay-panel span {
+  color: rgba(255, 255, 255, 0.75);
+}
+
 .file-preview-panel {
   display: grid;
   gap: 16px;
-  padding: 18px;
+  padding: 20px;
   border-radius: 24px;
-  background: rgba(255, 255, 255, 0.04);
-  border: 1px solid rgba(138, 180, 248, 0.14);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(138, 180, 248, 0.22);
+  box-shadow: 0 20px 45px rgba(0, 0, 0, 0.18);
 }
 
 .file-preview-header {
@@ -408,6 +441,7 @@ button:not(:disabled):active {
 .file-preview-grid {
   display: grid;
   gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
 }
 
 .file-preview-card {
@@ -432,13 +466,14 @@ button:not(:disabled):active {
 }
 
 .file-preview-text {
-  min-height: 70px;
-  padding: 12px;
+  min-height: 80px;
+  max-height: 180px;
+  padding: 14px;
   border-radius: 16px;
   background: var(--surface-soft);
   color: var(--text);
   white-space: pre-wrap;
-  overflow: hidden;
+  overflow: auto;
 }
 
 .outgoing-preview {
@@ -459,13 +494,15 @@ button:not(:disabled):active {
 
 .outgoing-preview pre {
   margin: 0;
-  padding: 12px;
-  border-radius: 14px;
-  background: rgba(0, 0, 0, 0.18);
+  padding: 14px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(138, 180, 248, 0.12);
   color: var(--text);
-  font-size: 0.9rem;
+  font-size: 0.95rem;
   white-space: pre-wrap;
   word-break: break-word;
+  overflow-x: auto;
 }
 
 .secondary-button {
@@ -496,8 +533,9 @@ button:not(:disabled):active {
   display: flex;
   flex: 1 1 auto;
   flex-direction: column;
-  gap: 12px;
-  overflow: hidden;
+  gap: 16px;
+  overflow: auto;
+  min-height: 0;
 }
 
 .canvas-greeting {
