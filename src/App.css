@@ -115,7 +115,13 @@ button:not(:disabled):active {
   grid-template-columns: clamp(180px, 18vw, 220px) minmax(0, 1fr);
   overflow: hidden;
   color: var(--text);
-  background: var(--bg);
+  background: radial-gradient(circle at top left, #1f2432 0%, #131314 30%, #0f1115 100%);
+  background-image:
+    radial-gradient(circle at top left, rgba(138, 180, 248, 0.24), transparent 24%),
+    radial-gradient(circle at 80% 18%, rgba(61, 211, 255, 0.18), transparent 18%),
+    linear-gradient(180deg, rgba(255,255,255,0.04), transparent 40%);
+  background-repeat: no-repeat;
+  background-size: cover;
   color-scheme: dark;
 }
 
@@ -137,6 +143,13 @@ button:not(:disabled):active {
   --send-text: #ffffff;
 
   color-scheme: light;
+  background: radial-gradient(circle at top left, #f7fbff 0%, #edf2f8 28%, #f5f8fc 100%);
+  background-image:
+    radial-gradient(circle at top left, rgba(26, 115, 232, 0.14), transparent 22%),
+    radial-gradient(circle at 84% 18%, rgba(138, 180, 248, 0.08), transparent 18%),
+    linear-gradient(180deg, rgba(255,255,255,0.35), transparent 45%);
+  background-repeat: no-repeat;
+  background-size: cover;
 }
 
 .app-shell ::selection {
