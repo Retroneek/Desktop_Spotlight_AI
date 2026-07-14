@@ -731,6 +731,7 @@ function App() {
 
   const [message, setMessage] = useState("");
   const [isDragging, setIsDragging] = useState(false);
+  const [isComposerExpanded, setIsComposerExpanded] = useState(false);
   const [selectedPreviewFileId, setSelectedPreviewFileId] = useState<
     string | null
   >(null);
@@ -1106,12 +1107,18 @@ function App() {
       maxMessageHeight,
     );
 
+    const isExpanded = nextHeight > lineHeight + verticalPadding + 12;
+
     textarea.style.height = `${nextHeight}px`;
 
     textarea.style.overflowY =
       textarea.scrollHeight > maxMessageHeight
         ? "auto"
         : "hidden";
+
+    setIsComposerExpanded((current) =>
+      current === isExpanded ? current : isExpanded,
+    );
   }, [message]);
 
   useLayoutEffect(() => {
@@ -2427,6 +2434,8 @@ function App() {
 
             <div
               className={`composer-shell${
+                isComposerExpanded ? " expanded" : ""
+              }${
                 isGenerating ? " generating" : ""
               }`}
               aria-label="Message composer"

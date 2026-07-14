@@ -1890,6 +1890,14 @@ h3 {
   contain: layout paint;
 }
 
+.composer-shell.expanded {
+  align-items: flex-end;
+  padding-top: 8px;
+  padding-bottom: 8px;
+
+  border-radius: 26px;
+}
+
 .composer-shell > * {
   min-width: 0;
 }
@@ -1941,6 +1949,13 @@ h3 {
 
   scrollbar-width: thin;
   scrollbar-color: var(--muted-soft) transparent;
+}
+
+.composer-shell.expanded .prompt-box {
+  padding-top: 7px;
+  padding-bottom: 7px;
+
+  line-height: 1.35;
 }
 
 
@@ -2023,6 +2038,14 @@ h3 {
   align-items: center;
   justify-content: center;
   gap: 7px;
+}
+
+.composer-shell.expanded .attach-button,
+.composer-shell.expanded .preset-pill-button,
+.composer-shell.expanded .composer-summarize-button,
+.composer-shell.expanded .cancel-button.composer-cancel-button,
+.composer-shell.expanded .send-button {
+  margin-bottom: 2px;
 }
 
 .cancel-button.composer-cancel-button {
