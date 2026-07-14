@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-const OLLAMA_BASE_URL = "http://127.0.0.1:11434";
+const DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
 
 export type OllamaModel = {
   name?: string;
@@ -48,7 +48,7 @@ async function readOllamaError(response: Response) {
   }
 }
 
-export function useOllama() {
+export function useOllama(baseUrl = DEFAULT_OLLAMA_BASE_URL) {
   const [models, setModels] = useState<OllamaModel[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -56,7 +56,7 @@ export function useOllama() {
 
   const refreshModels = useCallback(async () => {
     try {
-      const response = await fetch(`${OLLAMA_BASE_URL}/api/tags`);
+      const response = await fetch(`${baseUrl}/api/tags`);
 
       if (!response.ok) {
         throw new Error(`Failed to load Ollama models: ${response.statusText}`);
@@ -70,7 +70,7 @@ export function useOllama() {
       setError(message);
       setModels([]);
     }
-  }, []);
+  }, [baseUrl]);
 
   useEffect(() => {
     void refreshModels();
@@ -106,7 +106,7 @@ export function useOllama() {
         const controller = new AbortController();
         abortControllerRef.current = controller;
 
-        const response = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
+        const response = await fetch(`${baseUrl}/api/chat`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -177,9 +177,7 @@ export function useOllama() {
           err instanceof Error &&
           err.name === "AbortError"
         ) {
-          const message = "Generation canceled.";
-          setError(message);
-          throw new Error(message);
+          throw new Error("Generation canceled.");
         }
 
         const message = getErrorMessage(err);
@@ -190,7 +188,7 @@ export function useOllama() {
         abortControllerRef.current = null;
       }
     },
-    [],
+    [baseUrl],
   );
 
   const cancelChat = useCallback(() => {

@@ -28,7 +28,65 @@ const presets = [
   },
 ] as const;
 
+const hardwareProfiles = [
+  {
+    id: "low-power",
+    label: "Low Power",
+    description: "Smaller local models and shorter previews for limited hardware.",
+  },
+  {
+    id: "balanced",
+    label: "Balanced",
+    description: "Default profile for everyday local analysis and chat.",
+  },
+  {
+    id: "high-quality",
+    label: "High Quality",
+    description: "Stronger local models and longer context on capable machines.",
+  },
+  {
+    id: "custom",
+    label: "Custom",
+    description: "Manual local setup for advanced users and non-default endpoints.",
+  },
+] as const;
+
+const runtimeProfiles = {
+  "low-power": {
+    previewCharacters: 1200,
+    recentMessageCount: 6,
+    systemNote:
+      "Optimize for smaller local models. Keep context tight, prefer shorter answers, and avoid unnecessary elaboration.",
+  },
+  balanced: {
+    previewCharacters: 2500,
+    recentMessageCount: 12,
+    systemNote:
+      "Balance context size with responsiveness for normal local desktop use.",
+  },
+  "high-quality": {
+    previewCharacters: 5000,
+    recentMessageCount: 18,
+    systemNote:
+      "Use the fuller available context and provide more complete reasoning when it helps the user.",
+  },
+  custom: {
+    previewCharacters: 7000,
+    recentMessageCount: 20,
+    systemNote:
+      "The user selected a custom local setup. Use the broader available context, but stay grounded in the supplied files and chat history.",
+  },
+} satisfies Record<
+  HardwareProfileId,
+  {
+    previewCharacters: number;
+    recentMessageCount: number;
+    systemNote: string;
+  }
+>;
+
 type PresetId = (typeof presets)[number]["id"];
+type HardwareProfileId = (typeof hardwareProfiles)[number]["id"];
 type Theme = "dark" | "light";
 
 type AttachedFile = {
@@ -55,6 +113,12 @@ type ChatSession = {
   updatedAt: number;
 };
 
+type RegenerateTarget = {
+  userTurn: ChatTurn;
+  assistantTurn: ChatTurn;
+  historyBeforeUserTurn: ChatTurn[];
+};
+
 type OllamaMessage = {
   role: "system" | "user" | "assistant";
   content: string;
@@ -78,6 +142,10 @@ const sidebarCollapsedStorageKey =
   "desktop-spotlight-ai-sidebar-collapsed";
 const selectedModelStorageKey =
   "desktop-spotlight-ai-selected-model";
+const hardwareProfileStorageKey =
+  "desktop-spotlight-ai-hardware-profile";
+const ollamaEndpointStorageKey =
+  "desktop-spotlight-ai-ollama-endpoint";
 
 const maxMessageLines = 10;
 const lineHeight = 18;
@@ -232,6 +300,34 @@ function getInitialSelectedModel() {
   }
 }
 
+function getInitialHardwareProfile(): HardwareProfileId {
+  try {
+    const stored = localStorage.getItem(hardwareProfileStorageKey);
+
+    if (
+      stored &&
+      hardwareProfiles.some((profile) => profile.id === stored)
+    ) {
+      return stored as HardwareProfileId;
+    }
+  } catch {
+    // Ignore localStorage access failures and fall back to default.
+  }
+
+  return "balanced";
+}
+
+function getInitialOllamaEndpoint() {
+  try {
+    return (
+      localStorage.getItem(ollamaEndpointStorageKey) ??
+      "http://127.0.0.1:11434"
+    );
+  } catch {
+    return "http://127.0.0.1:11434";
+  }
+}
+
 function formatFileSize(size: number) {
   if (size < 1024) {
     return `${size} B`;
@@ -255,7 +351,10 @@ function isSupportedTextFile(file: File) {
   );
 }
 
-async function summarizeFile(file: File): Promise<AttachedFile> {
+async function summarizeFile(
+  file: File,
+  previewCharacterLimit: number,
+): Promise<AttachedFile> {
   const supported = isSupportedTextFile(file);
 
   const typeLabel =
@@ -270,7 +369,7 @@ async function summarizeFile(file: File): Promise<AttachedFile> {
     const text = await file.text();
 
     preview = text.trim()
-      ? text.trim().slice(0, 2500)
+      ? text.trim().slice(0, previewCharacterLimit)
       : "Empty text file.";
   }
 
@@ -471,6 +570,21 @@ function ThemeIcon({ className, theme }: IconProps & { theme: Theme }) {
   );
 }
 
+function SettingsIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
+      <path
+        d="M6.6 2.2h2.8l.35 1.52c.35.12.69.27 1 .46l1.42-.67 1.4 2.42-1.06 1.02c.04.19.06.39.06.6s-.02.41-.06.6l1.06 1.02-1.4 2.42-1.42-.67c-.31.19-.65.34-1 .46l-.35 1.52H6.6l-.35-1.52a4.74 4.74 0 0 1-1-.46l-1.42.67-1.4-2.42 1.06-1.02A3.4 3.4 0 0 1 3.43 8c0-.21.02-.41.06-.6L2.43 6.38l1.4-2.42 1.42.67c.31-.19.65-.34 1-.46L6.6 2.2Z"
+        fill="none"
+        stroke="currentColor"
+        strokeLinejoin="round"
+        strokeWidth="1.2"
+      />
+      <circle cx="8" cy="8" r="1.85" fill="none" stroke="currentColor" strokeWidth="1.2" />
+    </svg>
+  );
+}
+
 function AttachIcon({ className }: IconProps) {
   return (
     <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
@@ -534,10 +648,13 @@ function buildMessages(
   session: ChatSession,
   prompt: string,
   preset: PresetId,
+  hardwareProfile: HardwareProfileId,
 ): OllamaMessage[] {
+  const runtimeProfile = runtimeProfiles[hardwareProfile];
+
   const recentMessages: OllamaMessage[] = session.turns
     .filter((turn) => turn.content.trim())
-    .slice(-12)
+    .slice(-runtimeProfile.recentMessageCount)
     .map((turn) => ({
       role: turn.role,
       content: turn.content,
@@ -548,6 +665,7 @@ ${presetSystemPrompts[preset]}
 
 The current mode selection is authoritative for this reply.
 If earlier messages in this chat used a different tone or depth, ignore that and follow the current mode instead.
+${runtimeProfile.systemNote}
 
 You are Desktop Spotlight AI, a local desktop assistant.
 Do not claim to be GPT-4, ChatGPT, or an OpenAI model.
@@ -568,22 +686,34 @@ Do not claim to be GPT-4, ChatGPT, or an OpenAI model.
 
 function App() {
   const initialStateRef = useRef(getInitialAppState());
+  const initialOllamaEndpoint = useRef(getInitialOllamaEndpoint());
 
   const {
     models,
     streamChat,
     isGenerating,
     error,
+    refreshModels,
     cancelChat,
-  } = useOllama();
+  } = useOllama(initialOllamaEndpoint.current);
 
   const [preset, setPreset] = useState<PresetId>("balanced");
+  const [hardwareProfile, setHardwareProfile] = useState<HardwareProfileId>(
+    getInitialHardwareProfile,
+  );
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(
     getInitialSidebarCollapsed,
   );
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [selectedModelName, setSelectedModelName] = useState(
     getInitialSelectedModel,
+  );
+  const [ollamaEndpoint, setOllamaEndpoint] = useState(
+    initialOllamaEndpoint.current,
+  );
+  const [endpointDraft, setEndpointDraft] = useState(
+    initialOllamaEndpoint.current,
   );
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
 
@@ -601,6 +731,13 @@ function App() {
 
   const [message, setMessage] = useState("");
   const [isDragging, setIsDragging] = useState(false);
+  const [selectedPreviewFileId, setSelectedPreviewFileId] = useState<
+    string | null
+  >(null);
+  const [isPreviewOpen, setIsPreviewOpen] = useState(false);
+  const [previewMode, setPreviewMode] = useState<
+    "extracted" | "sent"
+  >("extracted");
 
   const [historyMenu, setHistoryMenu] =
     useState<HistoryMenuState | null>(null);
@@ -636,6 +773,12 @@ function App() {
 
   const selectedPreset =
     presets.find((option) => option.id === preset) ?? presets[1];
+
+  const selectedHardwareProfile =
+    hardwareProfiles.find((profile) => profile.id === hardwareProfile) ??
+    hardwareProfiles[1];
+
+  const runtimeProfile = runtimeProfiles[hardwareProfile];
 
   const sortedSessions = useMemo(() => {
     return [...sessions].sort((left, right) => right.updatedAt - left.updatedAt);
@@ -695,8 +838,54 @@ function App() {
   const hasPrompt =
     message.trim().length > 0 || attachedFiles.length > 0;
 
+  const selectedPreviewFile = useMemo(() => {
+    if (!attachedFiles.length) {
+      return null;
+    }
+
+    return (
+      attachedFiles.find(
+        (file) => file.id === selectedPreviewFileId,
+      ) ?? attachedFiles[0]
+    );
+  }, [attachedFiles, selectedPreviewFileId]);
+
+  const pendingVisibleContent = attachedFiles.length
+    ? message.trim() || `Attached ${attachedFiles.length} file(s).`
+    : "";
+
+  const pendingPromptPreview = selectedPreviewFile
+    ? buildPrompt(pendingVisibleContent, attachedFiles)
+    : "";
+
+  const activePreviewText = selectedPreviewFile
+    ? previewMode === "sent"
+      ? pendingPromptPreview
+      : selectedPreviewFile.preview
+    : "";
+
   const activeSessionHasTurns =
     activeSession.turns.length > 0;
+
+  const regenerateTarget = useMemo<RegenerateTarget | null>(() => {
+    for (let index = activeSession.turns.length - 1; index > 0; index -= 1) {
+      const assistantTurn = activeSession.turns[index];
+      const userTurn = activeSession.turns[index - 1];
+
+      if (
+        assistantTurn.role === "assistant" &&
+        userTurn.role === "user"
+      ) {
+        return {
+          userTurn,
+          assistantTurn,
+          historyBeforeUserTurn: activeSession.turns.slice(0, index - 1),
+        };
+      }
+    }
+
+    return null;
+  }, [activeSession.turns]);
 
   const hasDraftMessage =
     message.trim().length > 0;
@@ -704,47 +893,44 @@ function App() {
   const emptyStateContent = useMemo(() => {
     if (attachedFiles.length > 0) {
       return {
-        title: "Your files are ready.",
+        title: "Files attached.",
         description:
-          "Ask for a summary, extract actions, or turn the contents into a draft.",
+          "Ask a question or generate a summary.",
         prompts: [
           "Summarize the attached notes and pull out the key actions.",
           "Review the attached files and tell me what matters most.",
-          "Turn the attached material into a clean message draft.",
         ],
       };
     }
 
     if (hasDraftMessage) {
       return {
-        title: "Draft ready.",
+        title: "Draft in progress.",
         description:
-          "Keep writing, attach a file, or send when you are ready.",
+          "Keep writing, attach a file, or send.",
         prompts: [] as string[],
       };
     }
 
     if (hasSavedChats && activeSessionHasTurns) {
       return {
-        title: "Start the next step.",
+        title: "Continue.",
         description:
-          "Continue a chat, drop in another file, or use a quick prompt to get moving.",
+          "Pick up where you left off or start something new.",
         prompts: [
           "Review my last conversation and suggest the next actions.",
           "Draft a follow-up message based on what we already discussed.",
-          "Help me compare two ideas and decide what to do next.",
         ],
       };
     }
 
     return {
-      title: "Hi, what can I help with today?",
+      title: "Ready.",
       description:
-        "Drop a file anywhere and ask a question, or start with one of these prompts.",
+        "Drop a file or ask a question.",
       prompts: [
         "Summarize the attached notes and pull out the key actions.",
         "Turn this into a clean email draft I can send.",
-        "Review this and tell me the most important takeaways.",
       ],
     };
   }, [
@@ -758,6 +944,11 @@ function App() {
     !isGenerating &&
     Boolean(activeModelName) &&
     hasPrompt;
+
+  const canSummarize =
+    !isGenerating &&
+    Boolean(activeModelName) &&
+    attachedFiles.length > 0;
 
   useEffect(() => {
     const saveTimer = window.setTimeout(() => {
@@ -783,12 +974,42 @@ function App() {
   }, [attachedFiles]);
 
   useEffect(() => {
+    if (!attachedFiles.length) {
+      if (selectedPreviewFileId !== null) {
+        setSelectedPreviewFileId(null);
+      }
+
+      if (isPreviewOpen) {
+        setIsPreviewOpen(false);
+      }
+
+      return;
+    }
+
+    if (
+      !selectedPreviewFileId ||
+      !attachedFiles.some(
+        (file) => file.id === selectedPreviewFileId,
+      )
+    ) {
+      setSelectedPreviewFileId(attachedFiles[0].id);
+    }
+  }, [attachedFiles, isPreviewOpen, selectedPreviewFileId]);
+
+  useEffect(() => {
     localStorage.setItem(activeChatStorageKey, activeSessionId);
   }, [activeSessionId]);
 
   useEffect(() => {
     localStorage.setItem(themeStorageKey, theme);
   }, [theme]);
+
+  useEffect(() => {
+    localStorage.setItem(
+      hardwareProfileStorageKey,
+      hardwareProfile,
+    );
+  }, [hardwareProfile]);
 
   useEffect(() => {
     localStorage.setItem(
@@ -821,6 +1042,13 @@ function App() {
   }, [activeModelName]);
 
   useEffect(() => {
+    localStorage.setItem(
+      ollamaEndpointStorageKey,
+      ollamaEndpoint,
+    );
+  }, [ollamaEndpoint]);
+
+  useEffect(() => {
     if (
       !sessions.some(
         (session) => session.id === activeSessionId,
@@ -843,6 +1071,7 @@ function App() {
       setHistoryMenu(null);
       setIsModelMenuOpen(false);
       setEditingSessionId(null);
+      setIsSettingsOpen(false);
     }
 
     window.addEventListener("pointerdown", closeHistoryMenu);
@@ -920,6 +1149,22 @@ function App() {
     );
   }
 
+  function removeTurn(sessionId: string, turnId: string) {
+    setSessions((current) =>
+      current.map((session) => {
+        if (session.id !== sessionId) {
+          return session;
+        }
+
+        return {
+          ...session,
+          updatedAt: Date.now(),
+          turns: session.turns.filter((turn) => turn.id !== turnId),
+        };
+      }),
+    );
+  }
+
   function queueStreamPaint() {
     if (streamFrameRef.current !== null) {
       return;
@@ -947,7 +1192,9 @@ function App() {
     if (!fileArray.length) return;
 
     const nextFiles = await Promise.all(
-      fileArray.map((file) => summarizeFile(file)),
+      fileArray.map((file) =>
+        summarizeFile(file, runtimeProfile.previewCharacters),
+      ),
     );
 
     setAttachedFiles((current) => {
@@ -1121,31 +1368,37 @@ function App() {
     );
   }
 
-  async function sendMessage(summarize = false) {
-    const trimmedMessage = message.trim();
+  function applyEndpointSettings() {
+    const nextEndpoint = endpointDraft.trim();
 
-    if (!trimmedMessage && attachedFiles.length === 0) {
+    if (!nextEndpoint) {
+      setEndpointDraft(ollamaEndpoint);
       return;
     }
 
-    if (
-      isGenerating ||
-      isCanceling ||
-      !activeSession ||
-      !activeModelName
-    ) {
-      return;
-    }
+    setOllamaEndpoint(nextEndpoint);
+  }
 
-    const sessionId = activeSession.id;
-    const filesForTurn = attachedFiles;
-
-    const visibleContent = summarize
-      ? trimmedMessage
-        ? `Please summarize the attached file(s) and answer: ${trimmedMessage}`
-        : "Please summarize the attached file(s)."
-      : trimmedMessage ||
-        `Attached ${filesForTurn.length} file(s).`;
+  async function runAssistantReply(options: {
+    sessionId: string;
+    baseTurns: ChatTurn[];
+    visibleContent: string;
+    filesForTurn: AttachedFile[];
+    assistantTurnId?: string;
+    userTurnId?: string;
+    shouldAppendUserTurn: boolean;
+    shouldClearComposerOnSuccess: boolean;
+  }) {
+    const {
+      sessionId,
+      baseTurns,
+      visibleContent,
+      filesForTurn,
+      assistantTurnId,
+      userTurnId,
+      shouldAppendUserTurn,
+      shouldClearComposerOnSuccess,
+    } = options;
 
     const modelPrompt = buildPrompt(
       visibleContent,
@@ -1153,28 +1406,33 @@ function App() {
     );
 
     const messages = buildMessages(
-      activeSession,
+      {
+        ...activeSession,
+        id: sessionId,
+        turns: baseTurns,
+      },
       modelPrompt,
       preset,
+      hardwareProfile,
     );
 
     const now = Date.now();
 
-    const userTurn: ChatTurn = {
-      id: `user-${now}`,
+    const nextUserTurn: ChatTurn = {
+      id: userTurnId ?? `user-${now}`,
       role: "user",
       content: visibleContent,
       files: filesForTurn,
     };
 
-    const assistantTurn: ChatTurn = {
-      id: `assistant-${now}`,
+    const nextAssistantTurn: ChatTurn = {
+      id: assistantTurnId ?? `assistant-${now}`,
       role: "assistant",
       content: "Thinking...",
     };
 
     const automaticTitle =
-      trimmedMessage ||
+      visibleContent.trim() ||
       filesForTurn[0]?.name ||
       "New chat";
 
@@ -1184,17 +1442,32 @@ function App() {
           return session;
         }
 
+        if (shouldAppendUserTurn) {
+          return {
+            ...session,
+            title:
+              session.title === "New chat"
+                ? automaticTitle.slice(0, 42)
+                : session.title,
+            turns: [
+              ...session.turns,
+              nextUserTurn,
+              nextAssistantTurn,
+            ],
+            updatedAt: Date.now(),
+          };
+        }
+
         return {
           ...session,
-          title:
-            session.title === "New chat"
-              ? automaticTitle.slice(0, 42)
-              : session.title,
-          turns: [
-            ...session.turns,
-            userTurn,
-            assistantTurn,
-          ],
+          turns: session.turns.map((turn) =>
+            turn.id === nextAssistantTurn.id
+              ? {
+                  ...turn,
+                  content: "Thinking...",
+                }
+              : turn,
+          ),
           updatedAt: Date.now(),
         };
       }),
@@ -1202,7 +1475,7 @@ function App() {
 
     let shouldClearComposer = false;
 
-    setStreamingTurnId(assistantTurn.id);
+    setStreamingTurnId(nextAssistantTurn.id);
     streamedTextRef.current = "";
     stickToBottomRef.current = true;
 
@@ -1225,17 +1498,18 @@ function App() {
         streamedTextRef.current.trim() ||
         "No response returned.";
 
-      shouldClearComposer = true;
+      shouldClearComposer = shouldClearComposerOnSuccess;
     } catch (sendError) {
       const errorMessage =
         sendError instanceof Error
           ? sendError.message
           : "Could not connect to the local assistant.";
 
-      completedText =
-        errorMessage === "Generation canceled."
-          ? "Generation canceled."
-          : `Error: ${errorMessage}`;
+      if (errorMessage === "Generation canceled.") {
+        completedText = streamedTextRef.current.trim();
+      } else {
+        completedText = `Error: ${errorMessage}`;
+      }
     } finally {
       if (streamFrameRef.current !== null) {
         window.cancelAnimationFrame(
@@ -1245,11 +1519,15 @@ function App() {
         streamFrameRef.current = null;
       }
 
-      updateTurnContent(
-        sessionId,
-        assistantTurn.id,
-        completedText,
-      );
+      if (completedText) {
+        updateTurnContent(
+          sessionId,
+          nextAssistantTurn.id,
+          completedText,
+        );
+      } else {
+        removeTurn(sessionId, nextAssistantTurn.id);
+      }
 
       if (shouldClearComposer) {
         setMessage("");
@@ -1264,6 +1542,70 @@ function App() {
       setStreamingTurnId(null);
       setIsCanceling(false);
     }
+  }
+
+  async function sendMessage(summarize = false) {
+    const trimmedMessage = message.trim();
+
+    if (!trimmedMessage && attachedFiles.length === 0) {
+      return;
+    }
+
+    if (
+      isGenerating ||
+      isCanceling ||
+      !activeSession ||
+      !activeModelName
+    ) {
+      return;
+    }
+
+    const filesForTurn = attachedFiles;
+
+    const visibleContent = summarize
+      ? trimmedMessage
+        ? `Please summarize the attached file(s) and answer: ${trimmedMessage}`
+        : "Please summarize the attached file(s)."
+      : trimmedMessage ||
+        `Attached ${filesForTurn.length} file(s).`;
+
+    setAttachedFiles([]);
+    setSelectedPreviewFileId(null);
+    setIsPreviewOpen(false);
+
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+
+    await runAssistantReply({
+      sessionId: activeSession.id,
+      baseTurns: activeSession.turns,
+      visibleContent,
+      filesForTurn,
+      shouldAppendUserTurn: true,
+      shouldClearComposerOnSuccess: true,
+    });
+  }
+
+  async function regenerateLastResponse() {
+    if (
+      isGenerating ||
+      isCanceling ||
+      !activeModelName ||
+      !regenerateTarget
+    ) {
+      return;
+    }
+
+    await runAssistantReply({
+      sessionId: activeSession.id,
+      baseTurns: regenerateTarget.historyBeforeUserTurn,
+      visibleContent: regenerateTarget.userTurn.content,
+      filesForTurn: regenerateTarget.userTurn.files ?? [],
+      assistantTurnId: regenerateTarget.assistantTurn.id,
+      shouldAppendUserTurn: false,
+      shouldClearComposerOnSuccess: false,
+    });
   }
 
   function handleKeyDown(
@@ -1331,6 +1673,12 @@ function App() {
 
     void addFiles(event.dataTransfer.files);
   }
+
+  const setupStatusLabel = error
+    ? error
+    : availableModelNames.length
+      ? `${availableModelNames.length} model${availableModelNames.length === 1 ? "" : "s"} available.`
+      : "No models found yet. Install or pull a local model to continue.";
 
   return (
     <main
@@ -1516,6 +1864,21 @@ function App() {
             </section>
           ))}
         </div>
+
+        <div className="sidebar-footer">
+          <button
+            type="button"
+            className="sidebar-settings-button"
+            aria-pressed={isSettingsOpen}
+            aria-label={isSettingsOpen ? "Open chat" : "Open settings"}
+            onClick={() =>
+              setIsSettingsOpen((current) => !current)
+            }
+          >
+            <SettingsIcon className="ui-icon" />
+            <span>{isSettingsOpen ? "Back to chat" : "Settings"}</span>
+          </button>
+        </div>
       </aside>
 
       {historyMenu ? (
@@ -1663,6 +2026,142 @@ function App() {
           />
         </header>
 
+        {isSettingsOpen ? (
+          <section className="card settings-card">
+            <div className="settings-header">
+              <div>
+                <h3>Settings</h3>
+                <p>
+                  Configure the local model connection and choose the device profile for this app.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                className="settings-close-button"
+                onClick={() => setIsSettingsOpen(false)}
+              >
+                Back to chat
+              </button>
+            </div>
+
+            <div className="settings-grid">
+              <section className="settings-panel">
+                <div className="settings-panel-header">
+                  <h4>Local AI</h4>
+                  <p>{setupStatusLabel}</p>
+                </div>
+
+                <label className="settings-field">
+                  <span>Ollama endpoint</span>
+                  <div className="settings-input-row">
+                    <input
+                      className="settings-input"
+                      type="text"
+                      value={endpointDraft}
+                      onChange={(event) =>
+                        setEndpointDraft(event.currentTarget.value)
+                      }
+                      placeholder="http://127.0.0.1:11434"
+                    />
+
+                    <button
+                      type="button"
+                      className="settings-apply-button"
+                      onClick={applyEndpointSettings}
+                    >
+                      Apply
+                    </button>
+                  </div>
+                </label>
+
+                <label className="settings-field">
+                  <span>Model</span>
+                  <select
+                    className="settings-select"
+                    value={activeModelName}
+                    disabled={!availableModelNames.length || isGenerating}
+                    onChange={(event) =>
+                      setSelectedModelName(event.currentTarget.value)
+                    }
+                  >
+                    {availableModelNames.length ? (
+                      availableModelNames.map((modelName) => (
+                        <option key={modelName} value={modelName}>
+                          {modelName}
+                        </option>
+                      ))
+                    ) : (
+                      <option value="">No models found</option>
+                    )}
+                  </select>
+                </label>
+
+                <div className="settings-actions">
+                  <button
+                    type="button"
+                    className="settings-secondary-button"
+                    onClick={() => {
+                      void refreshModels();
+                    }}
+                  >
+                    Retry connection
+                  </button>
+
+                  <p className="settings-note">
+                    Local processing stays on this device unless you add online features later.
+                  </p>
+                </div>
+              </section>
+
+              <section className="settings-panel">
+                <div className="settings-panel-header">
+                  <h4>Device profile</h4>
+                  <p>
+                    Each profile changes how much file content and chat history are sent to the local model.
+                  </p>
+                </div>
+
+                <div className="settings-profile-list" role="radiogroup" aria-label="Hardware profile">
+                  {hardwareProfiles.map((profile) => (
+                    <button
+                      key={profile.id}
+                      type="button"
+                      className={`settings-profile-card${profile.id === hardwareProfile ? " active" : ""}`}
+                      aria-pressed={profile.id === hardwareProfile}
+                      onClick={() => setHardwareProfile(profile.id)}
+                    >
+                      <strong>{profile.label}</strong>
+                      <span>{profile.description}</span>
+                    </button>
+                  ))}
+                </div>
+
+                <label className="settings-field">
+                  <span>Theme</span>
+                  <select
+                    className="settings-select"
+                    value={theme}
+                    onChange={(event) =>
+                      setTheme(event.currentTarget.value as Theme)
+                    }
+                  >
+                    <option value="dark">Dark</option>
+                    <option value="light">Light</option>
+                  </select>
+                </label>
+
+                <div className="settings-summary">
+                  <strong>{selectedHardwareProfile.label}</strong>
+                  <span>{selectedHardwareProfile.description}</span>
+                  <small>
+                    Sends up to {runtimeProfile.previewCharacters.toLocaleString()} file characters and {runtimeProfile.recentMessageCount} recent messages. Response style still uses {selectedPreset.label}.
+                  </small>
+                </div>
+              </section>
+            </div>
+          </section>
+        ) : (
         <section className="card chat-canvas">
           {activeSession.turns.length === 0 ? (
             <div className="canvas-greeting">
@@ -1687,13 +2186,127 @@ function App() {
             </div>
           ) : (
             <div className="active-chat-heading">
-              <span>{activeSession.title}</span>
+              <span>Conversation</span>
 
               {isGenerating ? (
-                <small>Generating response…</small>
+                <small>Generating</small>
               ) : null}
             </div>
           )}
+
+          {selectedPreviewFile ? (
+            <section
+              className={`file-preview-panel${
+                isPreviewOpen ? " open" : ""
+              }`}
+              aria-label="Attached file preview"
+            >
+              <div className="file-preview-header">
+                <button
+                  type="button"
+                  className="file-preview-toggle"
+                  aria-expanded={isPreviewOpen}
+                  onClick={() =>
+                    setIsPreviewOpen((current) => !current)
+                  }
+                >
+                  <span className="file-preview-toggle-copy">
+                    <small>{selectedPreviewFile.name}</small>
+                  </span>
+
+                  <span className="file-preview-toggle-action">
+                    {isPreviewOpen ? "Hide preview" : "Preview"}
+                  </span>
+                </button>
+              </div>
+
+              {isPreviewOpen ? (
+                <>
+                  {attachedFiles.length > 1 ? (
+                    <div
+                      className="file-preview-tabs"
+                      role="tablist"
+                      aria-label="Attached files"
+                    >
+                      {attachedFiles.map((file) => (
+                        <button
+                          key={file.id}
+                          type="button"
+                          role="tab"
+                          aria-selected={file.id === selectedPreviewFile.id}
+                          className={`file-preview-tab${
+                            file.id === selectedPreviewFile.id
+                              ? " active"
+                              : ""
+                          }`}
+                          onClick={() =>
+                            setSelectedPreviewFileId(file.id)
+                          }
+                        >
+                          <strong>{file.name}</strong>
+                          <span>{file.sizeLabel}</span>
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
+
+                  <div className="file-preview-toolbar">
+                    <div
+                      className="file-preview-mode-switch"
+                      role="tablist"
+                      aria-label="Preview mode"
+                    >
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={previewMode === "extracted"}
+                        className={`file-preview-mode-button${
+                          previewMode === "extracted"
+                            ? " active"
+                            : ""
+                        }`}
+                        onClick={() => setPreviewMode("extracted")}
+                      >
+                        Extracted
+                      </button>
+
+                      <button
+                        type="button"
+                        role="tab"
+                        aria-selected={previewMode === "sent"}
+                        className={`file-preview-mode-button${
+                          previewMode === "sent"
+                            ? " active"
+                            : ""
+                        }`}
+                        onClick={() => setPreviewMode("sent")}
+                      >
+                        Sent to model
+                      </button>
+                    </div>
+
+                    <span className="file-preview-status">
+                      {previewMode === "sent"
+                        ? "Current draft plus attached file context"
+                        : selectedPreviewFile.supported
+                          ? "Ready for local analysis"
+                          : "Preview unavailable for this file type"}
+                    </span>
+                  </div>
+
+                  <pre
+                    className={`file-preview-text${
+                      previewMode === "sent"
+                        ? " prompt-preview-text"
+                        : ""
+                    }`}
+                  >
+                    {activePreviewText}
+                  </pre>
+                </>
+              ) : null}
+            </section>
+          ) : null}
 
           <div className="response-panel">
             {isGenerating ? (
@@ -1713,6 +2326,9 @@ function App() {
                 activeSession.turns.map((turn) => {
                   const isStreamingTurn =
                     turn.id === streamingTurnId;
+                  const canRegenerateTurn =
+                    turn.role === "assistant" &&
+                    regenerateTarget?.assistantTurn.id === turn.id;
 
                   return (
                     <div
@@ -1752,6 +2368,21 @@ function App() {
                       >
                         {turn.content}
                       </p>
+
+                      {canRegenerateTurn ? (
+                        <div className="turn-actions">
+                          <button
+                            type="button"
+                            className="turn-action-button"
+                            disabled={isGenerating || !activeModelName}
+                            onClick={() => {
+                              void regenerateLastResponse();
+                            }}
+                          >
+                            Regenerate
+                          </button>
+                        </div>
+                      ) : null}
                     </div>
                   );
                 })
@@ -1847,6 +2478,19 @@ function App() {
                 </button>
               ) : null}
 
+              {attachedFiles.length ? (
+                <button
+                  type="button"
+                  className="summarize-action-button composer-summarize-button"
+                  disabled={!canSummarize}
+                  onClick={() => {
+                    void sendMessage(true);
+                  }}
+                >
+                  Summarize
+                </button>
+              ) : null}
+
               <button
                 type="button"
                 className="send-button"
@@ -1862,6 +2506,7 @@ function App() {
             </div>
           </div>
         </section>
+        )}
       </section>
     </main>
   );
