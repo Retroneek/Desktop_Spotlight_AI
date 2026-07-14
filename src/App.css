@@ -1533,7 +1533,12 @@ h3 {
 .attach-button:focus-visible,
 .preset-pill-button:focus-visible,
 .cancel-button:focus-visible,
-.send-button:focus-visible {
+.send-button:focus-visible,
+.turn-action-button:focus-visible,
+.length-button:focus-visible,
+.citation-toggle:focus-visible,
+.turn-edit-cancel:focus-visible,
+.turn-edit-send:focus-visible {
   outline: none;
 
   box-shadow:
@@ -1543,6 +1548,220 @@ h3 {
       var(--accent) 32%,
       transparent
     );
+}
+
+/* Turn actions */
+
+.turn-actions {
+  display: flex;
+  gap: 4px;
+  margin-top: 6px;
+  opacity: 0;
+  transition: opacity 100ms linear;
+}
+
+.turn:hover .turn-actions,
+.turn:focus-within .turn-actions {
+  opacity: 1;
+}
+
+.turn-action-button {
+  height: 26px;
+  padding: 0 8px;
+
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+
+  border: 1px solid var(--border);
+  border-radius: 999px;
+
+  color: var(--muted);
+  background: color-mix(in srgb, var(--surface-soft) 80%, transparent);
+
+  font-size: 0.74rem;
+  font-weight: 500;
+
+  white-space: nowrap;
+}
+
+.turn-action-button:hover {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 24%, var(--border));
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+}
+
+.turn-action-button .ui-icon {
+  width: 12px;
+  height: 12px;
+}
+
+/* Inline turn editor */
+
+.turn-edit-shell {
+  display: grid;
+  gap: 6px;
+}
+
+.turn-edit-box {
+  width: 100%;
+  min-height: 60px;
+  padding: 7px 9px;
+
+  resize: vertical;
+
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+
+  color: var(--text);
+  background: color-mix(in srgb, var(--surface) 90%, transparent);
+
+  font-size: 0.88rem;
+  line-height: 1.45;
+
+  scrollbar-width: thin;
+  scrollbar-color: var(--muted-soft) transparent;
+}
+
+.turn-edit-box:focus {
+  outline: none;
+  border-color: color-mix(in srgb, var(--accent) 42%, var(--border));
+}
+
+.turn-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 6px;
+}
+
+.turn-edit-cancel,
+.turn-edit-send {
+  height: 30px;
+  padding: 0 12px;
+
+  border-radius: 999px;
+
+  font-size: 0.8rem;
+  font-weight: 600;
+}
+
+.turn-edit-cancel {
+  border: 1px solid var(--border);
+  color: var(--muted);
+  background: transparent;
+}
+
+.turn-edit-cancel:hover {
+  color: var(--text);
+  background: var(--hover);
+}
+
+.turn-edit-send {
+  border: 0;
+  color: var(--send-text);
+  background: var(--send-bg);
+}
+
+.turn-edit-send:hover:not(:disabled) {
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.16);
+}
+
+.turn-edit-send:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+/* Composer controls bar */
+
+.composer-controls {
+  min-width: 0;
+  padding: 0 2px;
+
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.length-controls {
+  display: flex;
+  gap: 4px;
+}
+
+.length-button {
+  height: 26px;
+  padding: 0 10px;
+
+  border: 1px solid var(--border);
+  border-radius: 999px;
+
+  color: var(--muted);
+  background: color-mix(in srgb, var(--surface-soft) 80%, transparent);
+
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+
+  white-space: nowrap;
+}
+
+.length-button:hover:not(:disabled) {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 24%, var(--border));
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+}
+
+.length-button.active {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 36%, var(--border));
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+}
+
+.length-button:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.citation-toggle {
+  height: 26px;
+  padding: 0 10px;
+
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+
+  border: 1px solid var(--border);
+  border-radius: 999px;
+
+  color: var(--muted);
+  background: color-mix(in srgb, var(--surface-soft) 80%, transparent);
+
+  font-size: 0.74rem;
+  font-weight: 600;
+
+  white-space: nowrap;
+}
+
+.citation-toggle:hover:not(:disabled) {
+  color: var(--text);
+  border-color: color-mix(in srgb, var(--accent) 24%, var(--border));
+  background: color-mix(in srgb, var(--accent) 8%, var(--surface));
+}
+
+.citation-toggle.active {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 36%, var(--border));
+  background: color-mix(in srgb, var(--accent) 12%, var(--surface));
+}
+
+.citation-toggle:disabled {
+  opacity: 0.42;
+  cursor: not-allowed;
+}
+
+.citation-toggle .ui-icon {
+  width: 13px;
+  height: 13px;
 }
 
 /* Responsive */

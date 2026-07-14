@@ -60,6 +60,8 @@ type OllamaMessage = {
   content: string;
 };
 
+type AnswerLength = "short" | "medium" | "long";
+
 type HistoryMenuState = {
   sessionId: string;
   x: number;
@@ -78,6 +80,8 @@ const sidebarCollapsedStorageKey =
   "desktop-spotlight-ai-sidebar-collapsed";
 const selectedModelStorageKey =
   "desktop-spotlight-ai-selected-model";
+const answerLengthStorageKey = "desktop-spotlight-ai-answer-length";
+const citationModeStorageKey = "desktop-spotlight-ai-citation-mode";
 
 const maxMessageLines = 10;
 const lineHeight = 18;
@@ -229,6 +233,24 @@ function getInitialSelectedModel() {
     return localStorage.getItem(selectedModelStorageKey) ?? "";
   } catch {
     return "";
+  }
+}
+
+function getInitialAnswerLength(): AnswerLength {
+  try {
+    const stored = localStorage.getItem(answerLengthStorageKey);
+    if (stored === "short" || stored === "long") return stored;
+    return "medium";
+  } catch {
+    return "medium";
+  }
+}
+
+function getInitialCitationMode(): boolean {
+  try {
+    return localStorage.getItem(citationModeStorageKey) === "true";
+  } catch {
+    return false;
   }
 }
 
@@ -502,6 +524,56 @@ function SendIcon({ className }: IconProps) {
   );
 }
 
+function RegenerateIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
+      <path
+        d="M2.5 8A5.5 5.5 0 0 1 13 5.5M2.5 8l-2-2m2 2 2-2M13.5 8A5.5 5.5 0 0 1 3 10.5M13.5 8l2 2m-2-2-2 2"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.4"
+      />
+    </svg>
+  );
+}
+
+function EditIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
+      <path
+        d="M10.5 2.5 13.5 5.5l-8 8H2.5v-3l8-8Z"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.4"
+      />
+    </svg>
+  );
+}
+
+function CitationsIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
+      <path
+        d="M3 2.5h10a.5.5 0 0 1 .5.5v10a.5.5 0 0 1-.5.5H3a.5.5 0 0 1-.5-.5V3a.5.5 0 0 1 .5-.5Z"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.3"
+      />
+      <path
+        d="M5 5.5h6M5 8h6M5 10.5h3"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="1.3"
+      />
+    </svg>
+  );
+}
+
 function buildPrompt(content: string, files: AttachedFile[]) {
   if (!files.length) {
     return content;
@@ -531,17 +603,29 @@ ${fileContext}`;
 }
 
 function buildMessages(
-  session: ChatSession,
+  historyTurns: ChatTurn[],
   prompt: string,
   preset: PresetId,
+  answerLength: AnswerLength,
+  citationMode: boolean,
 ): OllamaMessage[] {
-  const recentMessages: OllamaMessage[] = session.turns
+  const recentMessages: OllamaMessage[] = historyTurns
     .filter((turn) => turn.content.trim())
     .slice(-12)
     .map((turn) => ({
       role: turn.role,
       content: turn.content,
     }));
+
+  const lengthAdditions: Record<AnswerLength, string> = {
+    short: "\n\nLength: Keep this response very concise — aim for 1 to 3 sentences unless a list or code is more appropriate.",
+    medium: "",
+    long: "\n\nLength: Provide a detailed, comprehensive response. Elaborate on key points and give full explanations.",
+  };
+
+  const citationAddition = citationMode
+    ? "\n\nCitations: Where you make factual claims, include inline citations formatted as [1], [2], etc. and list the sources at the end of your reply."
+    : "";
 
   const identityPrompt = `
 ${presetSystemPrompts[preset]}
@@ -550,7 +634,7 @@ The current mode selection is authoritative for this reply.
 If earlier messages in this chat used a different tone or depth, ignore that and follow the current mode instead.
 
 You are Desktop Spotlight AI, a local desktop assistant.
-Do not claim to be GPT-4, ChatGPT, or an OpenAI model.
+Do not claim to be GPT-4, ChatGPT, or an OpenAI model.${lengthAdditions[answerLength]}${citationAddition}
 `.trim();
 
   return [
@@ -612,7 +696,13 @@ function App() {
   const [streamingTurnId, setStreamingTurnId] =
     useState<string | null>(null);
 
+  const [answerLength, setAnswerLength] = useState<AnswerLength>(getInitialAnswerLength);
+  const [citationMode, setCitationMode] = useState<boolean>(getInitialCitationMode);
+  const [editingTurnId, setEditingTurnId] = useState<string | null>(null);
+  const [draftTurnContent, setDraftTurnContent] = useState("");
+
   const messageRef = useRef<HTMLTextAreaElement>(null);
+  const editTurnRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const responseLogRef = useRef<HTMLDivElement>(null);
   const streamingTextElementRef = useRef<HTMLParagraphElement>(null);
@@ -821,6 +911,14 @@ function App() {
   }, [activeModelName]);
 
   useEffect(() => {
+    localStorage.setItem(answerLengthStorageKey, answerLength);
+  }, [answerLength]);
+
+  useEffect(() => {
+    localStorage.setItem(citationModeStorageKey, String(citationMode));
+  }, [citationMode]);
+
+  useEffect(() => {
     if (
       !sessions.some(
         (session) => session.id === activeSessionId,
@@ -843,6 +941,7 @@ function App() {
       setHistoryMenu(null);
       setIsModelMenuOpen(false);
       setEditingSessionId(null);
+      setEditingTurnId(null);
     }
 
     window.addEventListener("pointerdown", closeHistoryMenu);
@@ -1153,9 +1252,11 @@ function App() {
     );
 
     const messages = buildMessages(
-      activeSession,
+      activeSession.turns,
       modelPrompt,
       preset,
+      answerLength,
+      citationMode,
     );
 
     const now = Date.now();
@@ -1260,6 +1361,195 @@ function App() {
         }
       }
 
+      streamedTextRef.current = "";
+      setStreamingTurnId(null);
+      setIsCanceling(false);
+    }
+  }
+
+  async function regenerateResponse(assistantTurnId: string) {
+    if (isGenerating || isCanceling || !activeSession || !activeModelName) {
+      return;
+    }
+
+    const turns = activeSession.turns;
+    const assistantTurnIndex = turns.findIndex(
+      (t) => t.id === assistantTurnId,
+    );
+
+    if (assistantTurnIndex < 1) return;
+
+    const userTurn = turns[assistantTurnIndex - 1];
+    if (!userTurn || userTurn.role !== "user") return;
+
+    const sessionId = activeSession.id;
+    const historyTurns = turns.slice(0, assistantTurnIndex - 1);
+
+    const modelPrompt = buildPrompt(
+      userTurn.content,
+      userTurn.files ?? [],
+    );
+
+    const messages = buildMessages(
+      historyTurns,
+      modelPrompt,
+      preset,
+      answerLength,
+      citationMode,
+    );
+
+    updateTurnContent(sessionId, assistantTurnId, "Thinking...");
+    setStreamingTurnId(assistantTurnId);
+    streamedTextRef.current = "";
+    stickToBottomRef.current = true;
+
+    let completedText = "";
+
+    try {
+      const returnedText = await streamChat(
+        messages,
+        activeModelName,
+        (token: string) => {
+          streamedTextRef.current += token;
+          queueStreamPaint();
+        },
+      );
+
+      completedText =
+        (typeof returnedText === "string"
+          ? returnedText.trim()
+          : "") ||
+        streamedTextRef.current.trim() ||
+        "No response returned.";
+    } catch (err) {
+      const errorMessage =
+        err instanceof Error
+          ? err.message
+          : "Could not connect to the local assistant.";
+
+      completedText =
+        errorMessage === "Generation canceled."
+          ? "Generation canceled."
+          : `Error: ${errorMessage}`;
+    } finally {
+      if (streamFrameRef.current !== null) {
+        window.cancelAnimationFrame(streamFrameRef.current);
+        streamFrameRef.current = null;
+      }
+
+      updateTurnContent(sessionId, assistantTurnId, completedText);
+      streamedTextRef.current = "";
+      setStreamingTurnId(null);
+      setIsCanceling(false);
+    }
+  }
+
+  function startEditTurn(turnId: string) {
+    const turn = activeSession.turns.find((t) => t.id === turnId);
+    if (!turn || turn.role !== "user") return;
+
+    setDraftTurnContent(turn.content);
+    setEditingTurnId(turnId);
+
+    window.requestAnimationFrame(() => {
+      editTurnRef.current?.focus();
+    });
+  }
+
+  async function commitEditAndResend() {
+    const trimmed = draftTurnContent.trim();
+
+    if (!editingTurnId || !trimmed) {
+      setEditingTurnId(null);
+      return;
+    }
+
+    if (isGenerating || isCanceling || !activeSession || !activeModelName) {
+      return;
+    }
+
+    const turns = activeSession.turns;
+    const userTurnIndex = turns.findIndex((t) => t.id === editingTurnId);
+
+    if (userTurnIndex === -1) return;
+
+    const userTurn = turns[userTurnIndex];
+    const sessionId = activeSession.id;
+    const historyTurns = turns.slice(0, userTurnIndex);
+
+    const updatedUserTurn: ChatTurn = {
+      ...userTurn,
+      content: trimmed,
+    };
+
+    const newAssistantId = createId("assistant");
+    const newAssistantTurn: ChatTurn = {
+      id: newAssistantId,
+      role: "assistant",
+      content: "Thinking...",
+    };
+
+    setSessions((current) =>
+      current.map((session) => {
+        if (session.id !== sessionId) return session;
+        return {
+          ...session,
+          turns: [...historyTurns, updatedUserTurn, newAssistantTurn],
+          updatedAt: Date.now(),
+        };
+      }),
+    );
+
+    setEditingTurnId(null);
+
+    const modelPrompt = buildPrompt(trimmed, userTurn.files ?? []);
+    const messages = buildMessages(
+      historyTurns,
+      modelPrompt,
+      preset,
+      answerLength,
+      citationMode,
+    );
+
+    setStreamingTurnId(newAssistantId);
+    streamedTextRef.current = "";
+    stickToBottomRef.current = true;
+
+    let completedText = "";
+
+    try {
+      const returnedText = await streamChat(
+        messages,
+        activeModelName,
+        (token: string) => {
+          streamedTextRef.current += token;
+          queueStreamPaint();
+        },
+      );
+
+      completedText =
+        (typeof returnedText === "string"
+          ? returnedText.trim()
+          : "") ||
+        streamedTextRef.current.trim() ||
+        "No response returned.";
+    } catch (err) {
+      const errorMessage =
+        err instanceof Error
+          ? err.message
+          : "Could not connect to the local assistant.";
+
+      completedText =
+        errorMessage === "Generation canceled."
+          ? "Generation canceled."
+          : `Error: ${errorMessage}`;
+    } finally {
+      if (streamFrameRef.current !== null) {
+        window.cancelAnimationFrame(streamFrameRef.current);
+        streamFrameRef.current = null;
+      }
+
+      updateTurnContent(sessionId, newAssistantId, completedText);
       streamedTextRef.current = "";
       setStreamingTurnId(null);
       setIsCanceling(false);
@@ -1713,15 +2003,15 @@ function App() {
                 activeSession.turns.map((turn) => {
                   const isStreamingTurn =
                     turn.id === streamingTurnId;
+                  const isEditingThisTurn =
+                    editingTurnId === turn.id;
 
                   return (
                     <div
                       key={turn.id}
                       className={`turn turn-${turn.role}${
-                        isStreamingTurn
-                          ? " streaming"
-                          : ""
-                      }`}
+                        isStreamingTurn ? " streaming" : ""
+                      }${isEditingThisTurn ? " editing" : ""}`}
                     >
                       {turn.files?.length ? (
                         <div className="message-attachments">
@@ -1743,15 +2033,92 @@ function App() {
                         </div>
                       ) : null}
 
-                      <p
-                        ref={
-                          isStreamingTurn
-                            ? streamingTextElementRef
-                            : undefined
-                        }
-                      >
-                        {turn.content}
-                      </p>
+                      {isEditingThisTurn ? (
+                        <div className="turn-edit-shell">
+                          <textarea
+                            ref={editTurnRef}
+                            className="turn-edit-box"
+                            value={draftTurnContent}
+                            rows={3}
+                            onChange={(event) =>
+                              setDraftTurnContent(
+                                event.currentTarget.value,
+                              )
+                            }
+                            onKeyDown={(event) => {
+                              if (
+                                event.key === "Enter" &&
+                                !event.shiftKey &&
+                                !event.nativeEvent.isComposing
+                              ) {
+                                event.preventDefault();
+                                void commitEditAndResend();
+                              }
+                              if (event.key === "Escape") {
+                                setEditingTurnId(null);
+                              }
+                            }}
+                          />
+                          <div className="turn-edit-actions">
+                            <button
+                              type="button"
+                              className="turn-edit-cancel"
+                              onClick={() => setEditingTurnId(null)}
+                            >
+                              Cancel
+                            </button>
+                            <button
+                              type="button"
+                              className="turn-edit-send"
+                              disabled={!draftTurnContent.trim()}
+                              onClick={() => void commitEditAndResend()}
+                            >
+                              Resend
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <p
+                          ref={
+                            isStreamingTurn
+                              ? streamingTextElementRef
+                              : undefined
+                          }
+                        >
+                          {turn.content}
+                        </p>
+                      )}
+
+                      {!isStreamingTurn && !isEditingThisTurn && !isGenerating ? (
+                        <div className="turn-actions">
+                          {turn.role === "user" ? (
+                            <button
+                              type="button"
+                              className="turn-action-button"
+                              aria-label="Edit message"
+                              title="Edit and resend"
+                              onClick={() => startEditTurn(turn.id)}
+                            >
+                              <EditIcon className="ui-icon" />
+                              <span>Edit</span>
+                            </button>
+                          ) : null}
+                          {turn.role === "assistant" ? (
+                            <button
+                              type="button"
+                              className="turn-action-button"
+                              aria-label="Regenerate response"
+                              title="Regenerate"
+                              onClick={() =>
+                                void regenerateResponse(turn.id)
+                              }
+                            >
+                              <RegenerateIcon className="ui-icon" />
+                              <span>Regenerate</span>
+                            </button>
+                          ) : null}
+                        </div>
+                      ) : null}
                     </div>
                   );
                 })
@@ -1793,6 +2160,49 @@ function App() {
                 ))}
               </div>
             ) : null}
+
+            <div className="composer-controls">
+              <div
+                className="length-controls"
+                role="group"
+                aria-label="Response length"
+              >
+                {(["short", "medium", "long"] as AnswerLength[]).map(
+                  (len) => (
+                    <button
+                      key={len}
+                      type="button"
+                      className={`length-button${
+                        answerLength === len ? " active" : ""
+                      }`}
+                      aria-pressed={answerLength === len}
+                      disabled={isGenerating}
+                      onClick={() => setAnswerLength(len)}
+                    >
+                      {len.charAt(0).toUpperCase() + len.slice(1)}
+                    </button>
+                  ),
+                )}
+              </div>
+
+              <button
+                type="button"
+                className={`citation-toggle${
+                  citationMode ? " active" : ""
+                }`}
+                aria-pressed={citationMode}
+                disabled={isGenerating}
+                title={
+                  citationMode
+                    ? "Citations on — click to disable"
+                    : "Citations off — click to enable"
+                }
+                onClick={() => setCitationMode((c) => !c)}
+              >
+                <CitationsIcon className="ui-icon" />
+                <span>Citations</span>
+              </button>
+            </div>
 
             <div
               className={`composer-shell${
