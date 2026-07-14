@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 const OLLAMA_BASE_URL = "http://127.0.0.1:11434";
 
@@ -52,6 +52,7 @@ export function useOllama() {
   const [models, setModels] = useState<OllamaModel[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
 
   const refreshModels = useCallback(async () => {
     try {
@@ -84,7 +85,9 @@ export function useOllama() {
       const selectedModel = model.trim();
 
       if (!selectedModel) {
-        throw new Error("No Ollama model selected. Run: ollama pull llama3.2");
+        throw new Error(
+          "No model selected. Install a local assistant model."
+        );
       }
 
       const messages: OllamaChatMessage[] =
@@ -100,6 +103,9 @@ export function useOllama() {
       setError(null);
 
       try {
+        const controller = new AbortController();
+        abortControllerRef.current = controller;
+
         const response = await fetch(`${OLLAMA_BASE_URL}/api/chat`, {
           method: "POST",
           headers: {
@@ -110,6 +116,7 @@ export function useOllama() {
             messages,
             stream: true,
           }),
+          signal: controller.signal,
         });
 
         if (!response.ok) {
@@ -166,21 +173,38 @@ export function useOllama() {
 
         return fullText;
       } catch (err) {
+        if (
+          err instanceof Error &&
+          err.name === "AbortError"
+        ) {
+          const message = "Generation canceled.";
+          setError(message);
+          throw new Error(message);
+        }
+
         const message = getErrorMessage(err);
         setError(message);
         throw new Error(message);
       } finally {
         setIsGenerating(false);
+        abortControllerRef.current = null;
       }
     },
     [],
   );
+
+  const cancelChat = useCallback(() => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
+  }, []);
 
   return {
     models,
     isGenerating,
     error,
     refreshModels,
+    cancelChat,
     streamChat,
   };
 }

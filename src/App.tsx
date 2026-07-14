@@ -66,11 +66,18 @@ type HistoryMenuState = {
   y: number;
 };
 
+type IconProps = {
+  className?: string;
+};
+
 const storageKey = "desktop-spotlight-ai-chats";
 const activeChatStorageKey = "desktop-spotlight-ai-active-chat";
 const attachmentStorageKey = "desktop-spotlight-ai-attached-files";
-const modelStorageKey = "desktop-spotlight-ai-model";
 const themeStorageKey = "desktop-spotlight-ai-theme";
+const sidebarCollapsedStorageKey =
+  "desktop-spotlight-ai-sidebar-collapsed";
+const selectedModelStorageKey =
+  "desktop-spotlight-ai-selected-model";
 
 const maxMessageLines = 10;
 const lineHeight = 18;
@@ -80,21 +87,28 @@ const maxMessageHeight = lineHeight * maxMessageLines + verticalPadding;
 const presetSystemPrompts: Record<PresetId, string> = {
   lite: `
 You are Desktop Spotlight AI, a fast local desktop assistant.
-Give concise, practical answers.
+You are currently in Lite mode.
+For this reply, keep the answer concise, practical, and direct.
+Prefer short paragraphs or tight bullet lists.
+Unless the user asks for depth, keep the response brief.
 Prioritize attached file content when files are included.
 Do not invent information that is not present.
 `.trim(),
 
   balanced: `
 You are Desktop Spotlight AI, a helpful local desktop assistant.
-Give clear, direct answers with enough explanation to be useful.
+You are currently in Balanced mode.
+For this reply, give clear, direct answers with enough explanation to be useful.
+Use moderate detail and keep the structure clean.
 Prioritize attached file content when files are included.
 Do not invent information that is not present.
 `.trim(),
 
   pro: `
 You are Desktop Spotlight AI, a careful local desktop assistant.
-Give thorough, structured answers and explain important tradeoffs.
+You are currently in Pro mode.
+For this reply, give thorough, structured answers and explain important tradeoffs.
+Go deeper than Lite or Balanced when the user would benefit from it.
 Prioritize attached file content when files are included.
 Do not invent information that is not present.
 `.trim(),
@@ -202,9 +216,17 @@ function getInitialTheme(): Theme {
   }
 }
 
-function getInitialModel() {
+function getInitialSidebarCollapsed() {
   try {
-    return localStorage.getItem(modelStorageKey) ?? "";
+    return localStorage.getItem(sidebarCollapsedStorageKey) === "true";
+  } catch {
+    return false;
+  }
+}
+
+function getInitialSelectedModel() {
+  try {
+    return localStorage.getItem(selectedModelStorageKey) ?? "";
   } catch {
     return "";
   }
@@ -303,6 +325,183 @@ function getModelList(models: unknown) {
   return [];
 }
 
+function getModelDisplayName(modelName: string) {
+  const withoutNamespace = modelName.split("/").pop() ?? modelName;
+  const baseName = withoutNamespace.replace(/:.+$/i, "");
+  const normalized = baseName.toLowerCase();
+
+  const friendlyMatches: Array<[RegExp, string]> = [
+    [/^llama(?:-| )?3(?:\.| )?2\b/i, "Llama 3.2"],
+    [/^llama(?:-| )?3(?:\.| )?1\b/i, "Llama 3.1"],
+    [/^codellama\b/i, "Code Llama"],
+    [/^mistral\b/i, "Mistral"],
+    [/^mixtral\b/i, "Mixtral"],
+    [/^phi(?:-| )?3\b/i, "Phi 3"],
+    [/^qwen(?:-| )?2(?:\.| )?5\b/i, "Qwen 2.5"],
+    [/^gemma(?:-| )?2\b/i, "Gemma 2"],
+    [/^deepseek(?:-| )?coder\b/i, "DeepSeek Coder"],
+  ];
+
+  for (const [pattern, label] of friendlyMatches) {
+    if (pattern.test(normalized)) {
+      return label;
+    }
+  }
+
+  const titled = baseName
+    .replace(/[-_]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .replace(/\b[a-z]/g, (match) => match.toUpperCase());
+
+  if (titled.length <= 18) {
+    return titled;
+  }
+
+  return `${titled.slice(0, 15)}...`;
+}
+
+function getHistoryGroupLabel(timestamp: number) {
+  const date = new Date(timestamp);
+  const today = new Date();
+  const startOfToday = new Date(
+    today.getFullYear(),
+    today.getMonth(),
+    today.getDate(),
+  );
+  const startOfTarget = new Date(
+    date.getFullYear(),
+    date.getMonth(),
+    date.getDate(),
+  );
+
+  const dayDifference = Math.round(
+    (startOfToday.getTime() - startOfTarget.getTime()) /
+      (1000 * 60 * 60 * 24),
+  );
+
+  if (dayDifference === 0) {
+    return "Today";
+  }
+
+  if (dayDifference === 1) {
+    return "Yesterday";
+  }
+
+  if (dayDifference > 1 && dayDifference < 7) {
+    return date.toLocaleDateString(undefined, {
+      weekday: "long",
+    });
+  }
+
+  if (date.getFullYear() === today.getFullYear()) {
+    return date.toLocaleDateString(undefined, {
+      month: "short",
+      day: "numeric",
+    });
+  }
+
+  return date.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+}
+
+function CollapseIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
+      <path
+        d="M9.5 3.5 5.5 8l4 4.5"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.6"
+      />
+    </svg>
+  );
+}
+
+function NewChatIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
+      <path
+        d="M8 3.25v9.5M3.25 8h9.5"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="1.6"
+      />
+    </svg>
+  );
+}
+
+function MoreIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
+      <circle cx="3.5" cy="8" r="1.2" fill="currentColor" />
+      <circle cx="8" cy="8" r="1.2" fill="currentColor" />
+      <circle cx="12.5" cy="8" r="1.2" fill="currentColor" />
+    </svg>
+  );
+}
+
+function ThemeIcon({ className, theme }: IconProps & { theme: Theme }) {
+  if (theme === "dark") {
+    return (
+      <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
+        <circle cx="8" cy="8" r="3" fill="none" stroke="currentColor" strokeWidth="1.4" />
+        <path d="M8 1.75v1.6M8 12.65v1.6M1.75 8h1.6M12.65 8h1.6M3.4 3.4l1.15 1.15M11.45 11.45l1.15 1.15M3.4 12.6l1.15-1.15M11.45 4.55l1.15-1.15" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.4" />
+      </svg>
+    );
+  }
+
+  return (
+    <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
+      <path
+        d="M10.95 2.35a5.45 5.45 0 1 0 2.7 10.2A5.9 5.9 0 0 1 10.95 2.35Z"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.4"
+      />
+    </svg>
+  );
+}
+
+function AttachIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
+      <path
+        d="M5.9 8.1 9.6 4.4a2.15 2.15 0 1 1 3.05 3.05L7.8 12.3a3.2 3.2 0 1 1-4.55-4.55l5.1-5.1"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.4"
+      />
+    </svg>
+  );
+}
+
+function SendIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
+      <path
+        d="M2.2 7.8 13.5 2.9l-3.9 10.2-2.1-3.2-5.3-2.1Z"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.4"
+      />
+      <path d="M13.45 2.95 7.4 9" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.4" />
+    </svg>
+  );
+}
+
 function buildPrompt(content: string, files: AttachedFile[]) {
   if (!files.length) {
     return content;
@@ -335,7 +534,6 @@ function buildMessages(
   session: ChatSession,
   prompt: string,
   preset: PresetId,
-  modelName: string,
 ): OllamaMessage[] {
   const recentMessages: OllamaMessage[] = session.turns
     .filter((turn) => turn.content.trim())
@@ -348,8 +546,10 @@ function buildMessages(
   const identityPrompt = `
 ${presetSystemPrompts[preset]}
 
-You are running locally through Ollama using the model "${modelName}".
-If asked which model you are using, identify yourself as the selected local Ollama model.
+The current mode selection is authoritative for this reply.
+If earlier messages in this chat used a different tone or depth, ignore that and follow the current mode instead.
+
+You are Desktop Spotlight AI, a local desktop assistant.
 Do not claim to be GPT-4, ChatGPT, or an OpenAI model.
 `.trim();
 
@@ -374,10 +574,18 @@ function App() {
     streamChat,
     isGenerating,
     error,
+    cancelChat,
   } = useOllama();
 
   const [preset, setPreset] = useState<PresetId>("balanced");
   const [theme, setTheme] = useState<Theme>(getInitialTheme);
+  const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(
+    getInitialSidebarCollapsed,
+  );
+  const [selectedModelName, setSelectedModelName] = useState(
+    getInitialSelectedModel,
+  );
+  const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
 
   const [sessions, setSessions] = useState<ChatSession[]>(
     initialStateRef.current.sessions,
@@ -386,9 +594,6 @@ function App() {
   const [activeSessionId, setActiveSessionId] = useState(
     initialStateRef.current.activeSessionId,
   );
-
-  const [selectedModelName, setSelectedModelName] =
-    useState(getInitialModel);
 
   const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>(
     getInitialAttachedFiles,
@@ -424,7 +629,61 @@ function App() {
   }, [models]);
 
   const activeModelName =
-    selectedModelName || availableModelNames[0] || "";
+    selectedModelName &&
+    availableModelNames.includes(selectedModelName)
+      ? selectedModelName
+      : availableModelNames[0] ?? "";
+
+  const selectedPreset =
+    presets.find((option) => option.id === preset) ?? presets[1];
+
+  const sortedSessions = useMemo(() => {
+    return [...sessions].sort((left, right) => right.updatedAt - left.updatedAt);
+  }, [sessions]);
+
+  const historySections = useMemo(() => {
+    const sections: Array<{
+      label: string;
+      sessions: ChatSession[];
+    }> = [];
+
+    for (const session of sortedSessions) {
+      const label = getHistoryGroupLabel(session.updatedAt);
+      const currentSection = sections[sections.length - 1];
+
+      if (!currentSection || currentSection.label !== label) {
+        sections.push({ label, sessions: [session] });
+        continue;
+      }
+
+      currentSection.sessions.push(session);
+    }
+
+    return sections;
+  }, [sortedSessions]);
+
+  const hasSavedChats = useMemo(() => {
+    return sessions.some((session) => session.turns.length > 0);
+  }, [sessions]);
+
+  const collapsedPreviewSessions = useMemo(() => {
+    return sortedSessions
+      .filter((session) => session.turns.length > 0)
+      .slice(0, 3);
+  }, [sortedSessions]);
+
+  const [isCanceling, setIsCanceling] = useState(false);
+
+  function cyclePreset() {
+    const currentIndex = presets.findIndex(
+      (option) => option.id === preset,
+    );
+
+    const nextPreset =
+      presets[(currentIndex + 1) % presets.length];
+
+    setPreset(nextPreset.id);
+  }
 
   const activeSession = useMemo(() => {
     return (
@@ -433,35 +692,72 @@ function App() {
     );
   }, [activeSessionId, sessions])!;
 
-  const selectedPreset =
-    presets.find((option) => option.id === preset) ?? presets[1];
-
   const hasPrompt =
     message.trim().length > 0 || attachedFiles.length > 0;
+
+  const activeSessionHasTurns =
+    activeSession.turns.length > 0;
+
+  const hasDraftMessage =
+    message.trim().length > 0;
+
+  const emptyStateContent = useMemo(() => {
+    if (attachedFiles.length > 0) {
+      return {
+        title: "Your files are ready.",
+        description:
+          "Ask for a summary, extract actions, or turn the contents into a draft.",
+        prompts: [
+          "Summarize the attached notes and pull out the key actions.",
+          "Review the attached files and tell me what matters most.",
+          "Turn the attached material into a clean message draft.",
+        ],
+      };
+    }
+
+    if (hasDraftMessage) {
+      return {
+        title: "Draft ready.",
+        description:
+          "Keep writing, attach a file, or send when you are ready.",
+        prompts: [] as string[],
+      };
+    }
+
+    if (hasSavedChats && activeSessionHasTurns) {
+      return {
+        title: "Start the next step.",
+        description:
+          "Continue a chat, drop in another file, or use a quick prompt to get moving.",
+        prompts: [
+          "Review my last conversation and suggest the next actions.",
+          "Draft a follow-up message based on what we already discussed.",
+          "Help me compare two ideas and decide what to do next.",
+        ],
+      };
+    }
+
+    return {
+      title: "Hi, what can I help with today?",
+      description:
+        "Drop a file anywhere and ask a question, or start with one of these prompts.",
+      prompts: [
+        "Summarize the attached notes and pull out the key actions.",
+        "Turn this into a clean email draft I can send.",
+        "Review this and tell me the most important takeaways.",
+      ],
+    };
+  }, [
+    activeSessionHasTurns,
+    attachedFiles.length,
+    hasDraftMessage,
+    hasSavedChats,
+  ]);
 
   const canSend =
     !isGenerating &&
     Boolean(activeModelName) &&
     hasPrompt;
-
-  const canSummarize =
-    !isGenerating &&
-    Boolean(activeModelName) &&
-    attachedFiles.length > 0;
-
-  useEffect(() => {
-    if (!availableModelNames.length) {
-      if (selectedModelName) {
-        setSelectedModelName("");
-      }
-
-      return;
-    }
-
-    if (!availableModelNames.includes(selectedModelName)) {
-      setSelectedModelName(availableModelNames[0]);
-    }
-  }, [availableModelNames, selectedModelName]);
 
   useEffect(() => {
     const saveTimer = window.setTimeout(() => {
@@ -495,10 +791,34 @@ function App() {
   }, [theme]);
 
   useEffect(() => {
-    if (selectedModelName) {
-      localStorage.setItem(modelStorageKey, selectedModelName);
+    localStorage.setItem(
+      sidebarCollapsedStorageKey,
+      String(isSidebarCollapsed),
+    );
+  }, [isSidebarCollapsed]);
+
+  useEffect(() => {
+    if (!availableModelNames.length) {
+      if (selectedModelName) {
+        setSelectedModelName("");
+      }
+
+      return;
     }
-  }, [selectedModelName]);
+
+    if (!selectedModelName) {
+      setSelectedModelName(availableModelNames[0]);
+      return;
+    }
+
+    if (!availableModelNames.includes(selectedModelName)) {
+      setSelectedModelName(availableModelNames[0]);
+    }
+  }, [availableModelNames, selectedModelName]);
+
+  useEffect(() => {
+    localStorage.setItem(selectedModelStorageKey, activeModelName);
+  }, [activeModelName]);
 
   useEffect(() => {
     if (
@@ -514,12 +834,14 @@ function App() {
   useEffect(() => {
     function closeHistoryMenu() {
       setHistoryMenu(null);
+      setIsModelMenuOpen(false);
     }
 
     function handleEscape(event: globalThis.KeyboardEvent) {
       if (event.key !== "Escape") return;
 
       setHistoryMenu(null);
+      setIsModelMenuOpen(false);
       setEditingSessionId(null);
     }
 
@@ -784,19 +1106,13 @@ function App() {
     });
   }
 
-  function cyclePreset() {
-    const currentIndex = presets.findIndex(
-      (option) => option.id === preset,
-    );
-
-    const nextPreset =
-      presets[(currentIndex + 1) % presets.length];
-
-    setPreset(nextPreset.id);
-  }
-
   function openFilePicker() {
     fileInputRef.current?.click();
+  }
+
+  function applyStarterPrompt(prompt: string) {
+    setMessage(prompt);
+    messageRef.current?.focus();
   }
 
   function removeFile(fileId: string) {
@@ -814,6 +1130,7 @@ function App() {
 
     if (
       isGenerating ||
+      isCanceling ||
       !activeSession ||
       !activeModelName
     ) {
@@ -839,7 +1156,6 @@ function App() {
       activeSession,
       modelPrompt,
       preset,
-      activeModelName,
     );
 
     const now = Date.now();
@@ -884,16 +1200,11 @@ function App() {
       }),
     );
 
-    setMessage("");
-    setAttachedFiles([]);
-    setStreamingTurnId(assistantTurn.id);
+    let shouldClearComposer = false;
 
+    setStreamingTurnId(assistantTurn.id);
     streamedTextRef.current = "";
     stickToBottomRef.current = true;
-
-    if (fileInputRef.current) {
-      fileInputRef.current.value = "";
-    }
 
     let completedText = "";
 
@@ -912,14 +1223,19 @@ function App() {
           ? returnedText.trim()
           : "") ||
         streamedTextRef.current.trim() ||
-        "No response returned from Ollama.";
+        "No response returned.";
+
+      shouldClearComposer = true;
     } catch (sendError) {
       const errorMessage =
         sendError instanceof Error
           ? sendError.message
-          : "Could not connect to Ollama.";
+          : "Could not connect to the local assistant.";
 
-      completedText = `Ollama error: ${errorMessage}`;
+      completedText =
+        errorMessage === "Generation canceled."
+          ? "Generation canceled."
+          : `Error: ${errorMessage}`;
     } finally {
       if (streamFrameRef.current !== null) {
         window.cancelAnimationFrame(
@@ -935,8 +1251,18 @@ function App() {
         completedText,
       );
 
+      if (shouldClearComposer) {
+        setMessage("");
+        setAttachedFiles([]);
+
+        if (fileInputRef.current) {
+          fileInputRef.current.value = "";
+        }
+      }
+
       streamedTextRef.current = "";
       setStreamingTurnId(null);
+      setIsCanceling(false);
     }
   }
 
@@ -1009,6 +1335,8 @@ function App() {
   return (
     <main
       className={`app-shell theme-${theme}${
+        isSidebarCollapsed ? " sidebar-collapsed" : ""
+      }${
         isDragging ? " dragging" : ""
       }`}
       onDragEnter={handleDragEnter}
@@ -1028,18 +1356,67 @@ function App() {
         </div>
       ) : null}
 
-      <aside className="sidebar">
+      <aside
+        className={`sidebar${
+          isSidebarCollapsed ? " collapsed" : ""
+        }`}
+      >
         <div className="sidebar-header">
+          <div className="sidebar-header-bar">
+            <button
+              type="button"
+              className="sidebar-collapse-button"
+              onClick={() =>
+                setIsSidebarCollapsed((current) => !current)
+              }
+              aria-pressed={isSidebarCollapsed}
+              aria-label={
+                isSidebarCollapsed
+                  ? "Expand sidebar"
+                  : "Collapse sidebar"
+              }
+            >
+              <CollapseIcon
+                className={`ui-icon${
+                  isSidebarCollapsed ? " is-collapsed" : ""
+                }`}
+              />
+            </button>
+
+            <button
+              type="button"
+              className="sidebar-new-button"
+              onClick={createNewChat}
+              aria-label="Create new chat"
+            >
+              <NewChatIcon className="ui-icon" />
+            </button>
+          </div>
+
           <h2>Recent chats</h2>
 
-          <button
-            type="button"
-            className="sidebar-new-button"
-            onClick={createNewChat}
-            aria-label="Create new chat"
-          >
-            +
-          </button>
+          {collapsedPreviewSessions.length ? (
+            <div
+              className="sidebar-collapsed-list"
+              aria-hidden={!isSidebarCollapsed}
+            >
+              {collapsedPreviewSessions.map((session, index) => (
+                <button
+                  key={session.id}
+                  type="button"
+                  className={
+                    session.id === activeSession.id
+                      ? "sidebar-collapsed-item active"
+                      : "sidebar-collapsed-item"
+                  }
+                  onClick={() => selectSession(session.id)}
+                  aria-label={`Open recent chat ${index + 1}`}
+                >
+                  <span aria-hidden="true" />
+                </button>
+              ))}
+            </div>
+          ) : null}
         </div>
 
         <div
@@ -1047,88 +1424,96 @@ function App() {
           role="list"
           aria-label="Previous chat history"
         >
-          {sessions.map((session) => (
-            <div
-              key={session.id}
-              className={
-                session.id === activeSession.id
-                  ? "history-item-shell active"
-                  : "history-item-shell"
-              }
-              onContextMenu={(event) => {
-                event.preventDefault();
+          {historySections.map((section) => (
+            <section key={section.label} className="history-group">
+              <h3 className="history-group-label">{section.label}</h3>
 
-                openHistoryMenu(
-                  session.id,
-                  event.clientX,
-                  event.clientY,
-                );
-              }}
-            >
-              {editingSessionId === session.id ? (
-                <input
-                  className="history-rename-input"
-                  value={draftTitle}
-                  autoFocus
-                  onPointerDown={(event) =>
-                    event.stopPropagation()
-                  }
-                  onChange={(event) =>
-                    setDraftTitle(
-                      event.currentTarget.value,
-                    )
-                  }
-                  onBlur={commitRename}
-                  onKeyDown={(event) => {
-                    if (event.key === "Enter") {
-                      event.currentTarget.blur();
+              <div className="history-group-items">
+                {section.sessions.map((session) => (
+                  <div
+                    key={session.id}
+                    className={
+                      session.id === activeSession.id
+                        ? "history-item-shell active"
+                        : "history-item-shell"
                     }
+                    onContextMenu={(event) => {
+                      event.preventDefault();
 
-                    if (event.key === "Escape") {
-                      setEditingSessionId(null);
-                    }
-                  }}
-                />
-              ) : (
-                <button
-                  type="button"
-                  className="history-item"
-                  onClick={() =>
-                    selectSession(session.id)
-                  }
-                  onDoubleClick={() =>
-                    startRename(session.id)
-                  }
-                  aria-pressed={
-                    session.id === activeSession.id
-                  }
-                >
-                  <span className="history-item-title">
-                    {session.title}
-                  </span>
-                </button>
-              )}
+                      openHistoryMenu(
+                        session.id,
+                        event.clientX,
+                        event.clientY,
+                      );
+                    }}
+                  >
+                    {editingSessionId === session.id ? (
+                      <input
+                        className="history-rename-input"
+                        value={draftTitle}
+                        autoFocus
+                        onPointerDown={(event) =>
+                          event.stopPropagation()
+                        }
+                        onChange={(event) =>
+                          setDraftTitle(
+                            event.currentTarget.value,
+                          )
+                        }
+                        onBlur={commitRename}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") {
+                            event.currentTarget.blur();
+                          }
 
-              <button
-                type="button"
-                className="history-options-button"
-                aria-label={`More options for ${session.title}`}
-                onClick={(event) => {
-                  event.stopPropagation();
+                          if (event.key === "Escape") {
+                            setEditingSessionId(null);
+                          }
+                        }}
+                      />
+                    ) : (
+                      <button
+                        type="button"
+                        className="history-item"
+                        onClick={() =>
+                          selectSession(session.id)
+                        }
+                        onDoubleClick={() =>
+                          startRename(session.id)
+                        }
+                        aria-pressed={
+                          session.id === activeSession.id
+                        }
+                      >
+                        <span className="history-item-title">
+                          {session.title}
+                        </span>
+                      </button>
+                    )}
 
-                  const rect =
-                    event.currentTarget.getBoundingClientRect();
+                    <button
+                      type="button"
+                      className="history-options-button"
+                      aria-label={`More options for ${session.title}`}
+                      onClick={(event) => {
+                        event.stopPropagation();
 
-                  openHistoryMenu(
-                    session.id,
-                    rect.right - 164,
-                    rect.bottom + 6,
-                  );
-                }}
-              >
-                ⋯
-              </button>
-            </div>
+                        const rect =
+                          event.currentTarget.getBoundingClientRect();
+
+                        openHistoryMenu(
+                          session.id,
+                          rect.right - 164,
+                          rect.bottom + 6,
+                        );
+                      }}
+                    >
+                      <MoreIcon className="ui-icon" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            </section>
           ))}
         </div>
       </aside>
@@ -1180,63 +1565,85 @@ function App() {
       <section className="workspace">
         <header className="workspace-header">
           <div className="header-actions">
-            {availableModelNames.length ? (
-              <select
-                className="model-select"
-                value={activeModelName}
-                disabled={isGenerating}
-                onChange={(event) =>
-                  setSelectedModelName(
-                    event.currentTarget.value,
+            <div className="header-toolbar">
+              <div className="model-select-shell">
+                <span className="toolbar-label">Model</span>
+
+                <button
+                  type="button"
+                  className="model-select-trigger"
+                  aria-label="Select model"
+                  aria-haspopup="listbox"
+                  aria-expanded={isModelMenuOpen}
+                  title={activeModelName || "No models found"}
+                  disabled={!availableModelNames.length || isGenerating}
+                  onClick={() =>
+                    setIsModelMenuOpen((current) => !current)
+                  }
+                >
+                  <span className="model-select-value">
+                    {activeModelName
+                      ? getModelDisplayName(activeModelName)
+                      : "No models found"}
+                  </span>
+                </button>
+
+                {isModelMenuOpen && availableModelNames.length ? (
+                  <div
+                    className="model-select-menu"
+                    role="listbox"
+                    aria-label="Available models"
+                    onPointerDown={(event) =>
+                      event.stopPropagation()
+                    }
+                  >
+                    {availableModelNames.map((modelName) => (
+                      <button
+                        key={modelName}
+                        type="button"
+                        role="option"
+                        aria-selected={modelName === activeModelName}
+                        className={`model-select-option${
+                          modelName === activeModelName
+                            ? " active"
+                            : ""
+                        }`}
+                        onClick={() => {
+                          setSelectedModelName(modelName);
+                          setIsModelMenuOpen(false);
+                        }}
+                      >
+                        <span>{getModelDisplayName(modelName)}</span>
+                        <small>{modelName}</small>
+                      </button>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+
+              <button
+                type="button"
+                className="theme-toggle"
+                onClick={() =>
+                  setTheme((current) =>
+                    current === "dark"
+                      ? "light"
+                      : "dark",
                   )
                 }
-                aria-label="Select Ollama model"
-                title={
-                  error ??
-                  `Using ${activeModelName} through Ollama`
-                }
+                aria-pressed={theme === "light"}
               >
-                {availableModelNames.map(
-                  (modelName) => (
-                    <option
-                      key={modelName}
-                      value={modelName}
-                    >
-                      {modelName}
-                    </option>
-                  ),
-                )}
-              </select>
-            ) : (
-              <span
-                className={
-                  error
-                    ? "ollama-status error"
-                    : "ollama-status"
-                }
-                title={error ?? undefined}
-              >
-                {error
-                  ? "Ollama error"
-                  : "No model found"}
-              </span>
-            )}
-
-            <button
-              type="button"
-              className="theme-toggle"
-              onClick={() =>
-                setTheme((current) =>
-                  current === "dark"
-                    ? "light"
-                    : "dark",
-                )
-              }
-              aria-pressed={theme === "light"}
-            >
-              {theme === "dark" ? "Light" : "Dark"}
-            </button>
+                <ThemeIcon className="ui-icon" theme={theme} />
+                <span>{theme === "dark" ? "Light" : "Dark"}</span>
+              </button>
+            </div>
           </div>
+
+          {error ? (
+            <div className="ollama-error-banner" role="alert">
+              <span>Error: {error}</span>
+            </div>
+          ) : null}
 
           <input
             ref={fileInputRef}
@@ -1259,26 +1666,44 @@ function App() {
         <section className="card chat-canvas">
           {activeSession.turns.length === 0 ? (
             <div className="canvas-greeting">
-              <h3>Hi, what can I help with today?</h3>
+              <h3>{emptyStateContent.title}</h3>
 
-              <p>
-                Drop a file anywhere, select a model,
-                and ask a question.
-              </p>
+              <p>{emptyStateContent.description}</p>
+
+              {emptyStateContent.prompts.length ? (
+                <div className="starter-prompts" role="group" aria-label="Starter prompts">
+                  {emptyStateContent.prompts.map((prompt) => (
+                    <button
+                      key={prompt}
+                      type="button"
+                      className="starter-prompt-button"
+                      onClick={() => applyStarterPrompt(prompt)}
+                    >
+                      {prompt}
+                    </button>
+                  ))}
+                </div>
+              ) : null}
             </div>
           ) : (
             <div className="active-chat-heading">
               <span>{activeSession.title}</span>
 
-              <small>
-                {isGenerating
-                  ? "Generating response…"
-                  : activeModelName}
-              </small>
+              {isGenerating ? (
+                <small>Generating response…</small>
+              ) : null}
             </div>
           )}
 
           <div className="response-panel">
+            {isGenerating ? (
+              <div className="response-loading-banner">
+                <span className="loading-indicator" aria-live="polite">
+                  Generating response…
+                </span>
+              </div>
+            ) : null}
+
             <div
               ref={responseLogRef}
               className="response-log"
@@ -1333,7 +1758,7 @@ function App() {
               ) : (
                 <p className="response-empty">
                   Your first message will create a local
-                  Ollama response.
+                  response.
                 </p>
               )}
             </div>
@@ -1370,7 +1795,9 @@ function App() {
             ) : null}
 
             <div
-              className="composer-shell"
+              className={`composer-shell${
+                isGenerating ? " generating" : ""
+              }`}
               aria-label="Message composer"
             >
               <button
@@ -1380,7 +1807,7 @@ function App() {
                 disabled={isGenerating}
                 onClick={openFilePicker}
               >
-                +
+                <AttachIcon className="ui-icon" />
               </button>
 
               <textarea
@@ -1400,30 +1827,25 @@ function App() {
                 type="button"
                 className="preset-pill-button"
                 disabled={isGenerating}
-                aria-label={`Current preset ${selectedPreset.label}`}
+                aria-label={`Response style: ${selectedPreset.label}`}
                 title={selectedPreset.description}
                 onClick={cyclePreset}
               >
                 {selectedPreset.label}
               </button>
 
-              <button
-                type="button"
-                className="summarize-button"
-                aria-label="Summarize attached files"
-                disabled={!canSummarize}
-                onClick={() =>
-                  void sendMessage(true)
-                }
-              >
-                <span className="label-full">
-                  Summary
-                </span>
-
-                <span className="label-short">
-                  Sum
-                </span>
-              </button>
+              {isGenerating ? (
+                <button
+                  type="button"
+                  className="cancel-button composer-cancel-button"
+                  onClick={() => {
+                    setIsCanceling(true);
+                    cancelChat();
+                  }}
+                >
+                  Cancel
+                </button>
+              ) : null}
 
               <button
                 type="button"
@@ -1434,7 +1856,8 @@ function App() {
                   void sendMessage()
                 }
               >
-                {isGenerating ? "…" : "Send"}
+                <SendIcon className="ui-icon" />
+                <span>{isGenerating ? "Working" : "Send"}</span>
               </button>
             </div>
           </div>
