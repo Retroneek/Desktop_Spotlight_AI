@@ -239,7 +239,7 @@ function getInitialSelectedModel() {
 function getInitialAnswerLength(): AnswerLength {
   try {
     const stored = localStorage.getItem(answerLengthStorageKey);
-    if (stored === "short" || stored === "long") return stored;
+    if (stored === "short" || stored === "medium" || stored === "long") return stored;
     return "medium";
   } catch {
     return "medium";
@@ -1445,6 +1445,7 @@ function App() {
   }
 
   function startEditTurn(turnId: string) {
+    if (!activeSession) return;
     const turn = activeSession.turns.find((t) => t.id === turnId);
     if (!turn || turn.role !== "user") return;
 
