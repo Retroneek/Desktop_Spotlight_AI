@@ -10,24 +10,6 @@ import {
 import { useOllama } from "./services/ollama";
 import "./App.css";
 
-const presets = [
-  {
-    id: "lite",
-    label: "Lite",
-    description: "Fast answers for smaller files and quick summaries.",
-  },
-  {
-    id: "balanced",
-    label: "Balanced",
-    description: "Default mix of speed and reasoning depth.",
-  },
-  {
-    id: "pro",
-    label: "Pro",
-    description: "Best for longer prompts and more careful analysis.",
-  },
-] as const;
-
 const hardwareProfiles = [
   {
     id: "low-power",
@@ -85,7 +67,12 @@ const runtimeProfiles = {
   }
 >;
 
-type PresetId = (typeof presets)[number]["id"];
+type TaskMode =
+  | "coding"
+  | "reasoning"
+  | "writing"
+  | "file-analysis"
+  | "general";
 type HardwareProfileId = (typeof hardwareProfiles)[number]["id"];
 type Theme = "dark" | "light";
 
@@ -152,31 +139,45 @@ const lineHeight = 18;
 const verticalPadding = 10;
 const maxMessageHeight = lineHeight * maxMessageLines + verticalPadding;
 
-const presetSystemPrompts: Record<PresetId, string> = {
-  lite: `
+const taskSystemPrompts: Record<TaskMode, string> = {
+  coding: `
+You are Desktop Spotlight AI, a focused local coding assistant.
+Prioritize direct fixes, concrete code, and short explanations.
+When reviewing or debugging, identify the likely cause first, then give the smallest practical change.
+Avoid broad rewrites unless the user asks for them.
+Prioritize attached file content when files are included.
+Do not invent information that is not present.
+`.trim(),
+
+  reasoning: `
+You are Desktop Spotlight AI, a careful local reasoning assistant.
+Think through the problem, but present only the useful reasoning and final answer.
+Use concise structure for tradeoffs, comparisons, calculations, or decisions.
+Prefer the shortest reliable path over exhaustive exploration.
+Prioritize attached file content when files are included.
+Do not invent information that is not present.
+`.trim(),
+
+  writing: `
+You are Desktop Spotlight AI, a practical local writing assistant.
+Help draft, revise, summarize, and polish text while preserving the user's intent.
+Keep output clean and ready to use.
+Ask no extra questions unless the missing detail would materially change the result.
+Prioritize attached file content when files are included.
+Do not invent information that is not present.
+`.trim(),
+
+  "file-analysis": `
+You are Desktop Spotlight AI, an efficient local document assistant.
+Use attached file content as the primary source.
+Summarize, answer questions, and extract action items with concise evidence from the file when useful.
+Say when a detail is not present in the attached content.
+Do not invent information that is not present.
+`.trim(),
+
+  general: `
 You are Desktop Spotlight AI, a fast local desktop assistant.
-You are currently in Lite mode.
-For this reply, keep the answer concise, practical, and direct.
-Prefer short paragraphs or tight bullet lists.
-Unless the user asks for depth, keep the response brief.
-Prioritize attached file content when files are included.
-Do not invent information that is not present.
-`.trim(),
-
-  balanced: `
-You are Desktop Spotlight AI, a helpful local desktop assistant.
-You are currently in Balanced mode.
-For this reply, give clear, direct answers with enough explanation to be useful.
-Use moderate detail and keep the structure clean.
-Prioritize attached file content when files are included.
-Do not invent information that is not present.
-`.trim(),
-
-  pro: `
-You are Desktop Spotlight AI, a careful local desktop assistant.
-You are currently in Pro mode.
-For this reply, give thorough, structured answers and explain important tradeoffs.
-Go deeper than Lite or Balanced when the user would benefit from it.
+Give clear, practical answers with the least complexity needed.
 Prioritize attached file content when files are included.
 Do not invent information that is not present.
 `.trim(),
@@ -346,9 +347,304 @@ function isSupportedTextFile(file: File) {
   return (
     file.type === "text/plain" ||
     file.type === "text/markdown" ||
+    file.type === "text/rtf" ||
+    file.type === "application/rtf" ||
+    file.type ===
+      "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
     lowerName.endsWith(".txt") ||
-    lowerName.endsWith(".md")
+    lowerName.endsWith(".md") ||
+    lowerName.endsWith(".rtf") ||
+    lowerName.endsWith(".docx")
   );
+}
+
+function getFileTypeLabel(file: File) {
+  const lowerName = file.name.toLowerCase();
+
+  if (lowerName.endsWith(".docx")) {
+    return "Word document";
+  }
+
+  if (lowerName.endsWith(".rtf")) {
+    return "rich text";
+  }
+
+  if (lowerName.endsWith(".md")) {
+    return "text/markdown";
+  }
+
+  return file.type || "file";
+}
+
+function cleanExtractedText(text: string) {
+  return text
+    .replace(/\r\n?/g, "\n")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+async function inflateZipEntry(data: Uint8Array, compressionMethod: number) {
+  if (compressionMethod === 0) {
+    return data;
+  }
+
+  if (compressionMethod !== 8) {
+    throw new Error("Unsupported DOCX compression method.");
+  }
+
+  const stream = new Blob([data]).stream().pipeThrough(
+    new DecompressionStream("deflate-raw"),
+  );
+
+  return new Uint8Array(await new Response(stream).arrayBuffer());
+}
+
+async function readZipTextEntry(
+  file: File,
+  entryName: string,
+): Promise<string | null> {
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  const view = new DataView(bytes.buffer);
+  let endOfCentralDirectory = -1;
+
+  for (let index = bytes.length - 22; index >= 0; index -= 1) {
+    if (view.getUint32(index, true) === 0x06054b50) {
+      endOfCentralDirectory = index;
+      break;
+    }
+  }
+
+  if (endOfCentralDirectory === -1) {
+    throw new Error("Could not read DOCX zip directory.");
+  }
+
+  const entryCount = view.getUint16(endOfCentralDirectory + 10, true);
+  let centralDirectoryOffset = view.getUint32(
+    endOfCentralDirectory + 16,
+    true,
+  );
+  const decoder = new TextDecoder();
+
+  for (let entryIndex = 0; entryIndex < entryCount; entryIndex += 1) {
+    if (view.getUint32(centralDirectoryOffset, true) !== 0x02014b50) {
+      throw new Error("Invalid DOCX zip directory.");
+    }
+
+    const compressionMethod = view.getUint16(
+      centralDirectoryOffset + 10,
+      true,
+    );
+    const compressedSize = view.getUint32(
+      centralDirectoryOffset + 20,
+      true,
+    );
+    const fileNameLength = view.getUint16(
+      centralDirectoryOffset + 28,
+      true,
+    );
+    const extraLength = view.getUint16(centralDirectoryOffset + 30, true);
+    const commentLength = view.getUint16(
+      centralDirectoryOffset + 32,
+      true,
+    );
+    const localHeaderOffset = view.getUint32(
+      centralDirectoryOffset + 42,
+      true,
+    );
+    const fileNameStart = centralDirectoryOffset + 46;
+    const fileName = decoder.decode(
+      bytes.slice(fileNameStart, fileNameStart + fileNameLength),
+    );
+
+    if (fileName === entryName) {
+      if (view.getUint32(localHeaderOffset, true) !== 0x04034b50) {
+        throw new Error("Invalid DOCX file entry.");
+      }
+
+      const localFileNameLength = view.getUint16(
+        localHeaderOffset + 26,
+        true,
+      );
+      const localExtraLength = view.getUint16(
+        localHeaderOffset + 28,
+        true,
+      );
+      const dataStart =
+        localHeaderOffset + 30 + localFileNameLength + localExtraLength;
+      const compressedData = bytes.slice(
+        dataStart,
+        dataStart + compressedSize,
+      );
+      const inflated = await inflateZipEntry(
+        compressedData,
+        compressionMethod,
+      );
+
+      return decoder.decode(inflated);
+    }
+
+    centralDirectoryOffset +=
+      46 + fileNameLength + extraLength + commentLength;
+  }
+
+  return null;
+}
+
+function extractTextFromWordXml(xmlText: string) {
+  const xml = new DOMParser().parseFromString(xmlText, "application/xml");
+  const paragraphs = Array.from(xml.getElementsByTagNameNS("*", "p"));
+
+  if (!paragraphs.length) {
+    return cleanExtractedText(xml.documentElement.textContent ?? "");
+  }
+
+  function collectText(node: Node): string {
+    if (node.nodeType === Node.TEXT_NODE) {
+      return node.textContent ?? "";
+    }
+
+    if (node.nodeType !== Node.ELEMENT_NODE) {
+      return "";
+    }
+
+    const element = node as Element;
+
+    if (element.localName === "t") {
+      return element.textContent ?? "";
+    }
+
+    if (element.localName === "tab") {
+      return "\t";
+    }
+
+    if (element.localName === "br" || element.localName === "cr") {
+      return "\n";
+    }
+
+    return Array.from(element.childNodes).map(collectText).join("");
+  }
+
+  return cleanExtractedText(paragraphs.map(collectText).join("\n"));
+}
+
+async function extractDocxText(file: File) {
+  const documentXml = await readZipTextEntry(file, "word/document.xml");
+
+  if (!documentXml) {
+    throw new Error("DOCX document text was not found.");
+  }
+
+  return extractTextFromWordXml(documentXml);
+}
+
+function extractRtfText(rtf: string) {
+  const ignoredDestinations = new Set([
+    "colortbl",
+    "fonttbl",
+    "generator",
+    "info",
+    "pict",
+    "stylesheet",
+  ]);
+  const stack: boolean[] = [];
+  let output = "";
+  let index = 0;
+  let ignored = false;
+
+  while (index < rtf.length) {
+    const character = rtf[index];
+
+    if (character === "{") {
+      stack.push(ignored);
+      index += 1;
+
+      if (rtf[index] === "\\" && rtf[index + 1] === "*") {
+        ignored = true;
+        index += 2;
+      }
+
+      continue;
+    }
+
+    if (character === "}") {
+      ignored = stack.pop() ?? false;
+      index += 1;
+      continue;
+    }
+
+    if (character !== "\\") {
+      if (!ignored) {
+        output += character;
+      }
+
+      index += 1;
+      continue;
+    }
+
+    const escaped = rtf[index + 1];
+
+    if (escaped === "\\" || escaped === "{" || escaped === "}") {
+      if (!ignored) {
+        output += escaped;
+      }
+
+      index += 2;
+      continue;
+    }
+
+    if (escaped === "'") {
+      const hex = rtf.slice(index + 2, index + 4);
+
+      if (!ignored && /^[0-9a-f]{2}$/i.test(hex)) {
+        output += String.fromCharCode(Number.parseInt(hex, 16));
+      }
+
+      index += 4;
+      continue;
+    }
+
+    const match = rtf.slice(index + 1).match(/^([a-z]+)(-?\d+)? ?/i);
+
+    if (!match) {
+      index += 2;
+      continue;
+    }
+
+    const controlWord = match[1].toLowerCase();
+
+    if (ignoredDestinations.has(controlWord)) {
+      ignored = true;
+    }
+
+    if (!ignored) {
+      if (controlWord === "par" || controlWord === "line") {
+        output += "\n";
+      } else if (controlWord === "tab") {
+        output += "\t";
+      }
+    }
+
+    index += 1 + match[0].length;
+  }
+
+  return cleanExtractedText(output);
+}
+
+async function extractFileText(file: File) {
+  const lowerName = file.name.toLowerCase();
+
+  if (lowerName.endsWith(".docx")) {
+    return extractDocxText(file);
+  }
+
+  const text = await file.text();
+
+  if (lowerName.endsWith(".rtf") || file.type === "text/rtf") {
+    return extractRtfText(text);
+  }
+
+  return cleanExtractedText(text);
 }
 
 async function summarizeFile(
@@ -356,21 +652,23 @@ async function summarizeFile(
   previewCharacterLimit: number,
 ): Promise<AttachedFile> {
   const supported = isSupportedTextFile(file);
-
-  const typeLabel =
-    file.type ||
-    (file.name.toLowerCase().endsWith(".md")
-      ? "text/markdown"
-      : "file");
+  const typeLabel = getFileTypeLabel(file);
 
   let preview = "Preview unavailable for this file type.";
 
   if (supported) {
-    const text = await file.text();
+    try {
+      const text = await extractFileText(file);
 
-    preview = text.trim()
-      ? text.trim().slice(0, previewCharacterLimit)
-      : "Empty text file.";
+      preview = text
+        ? text.slice(0, previewCharacterLimit)
+        : "No readable text found in this file.";
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Could not read file.";
+
+      preview = `Could not extract text: ${message}`;
+    }
   }
 
   return {
@@ -644,10 +942,85 @@ Attached file context:
 ${fileContext}`;
 }
 
+function detectTaskMode(content: string, files: AttachedFile[]): TaskMode {
+  const text = content.toLowerCase();
+  const fileNames = files.map((file) => file.name.toLowerCase()).join(" ");
+
+  if (
+    /\b(code|coding|bug|debug|typescript|javascript|react|tauri|rust|python|function|component|api|error|stack trace|compile|build|test|refactor)\b/.test(
+      text,
+    ) ||
+    /\.(js|jsx|ts|tsx|rs|py|json|css|html|md|toml|yml|yaml)\b/.test(
+      fileNames,
+    )
+  ) {
+    return "coding";
+  }
+
+  if (
+    /\b(write|rewrite|draft|edit|polish|tone|email|letter|resume|cover letter|grammar|copy)\b/.test(
+      text,
+    )
+  ) {
+    return "writing";
+  }
+
+  if (
+    /\b(reason|why|explain|compare|decide|tradeoff|analyze|calculate|solve|strategy|plan|evaluate)\b/.test(
+      text,
+    )
+  ) {
+    return "reasoning";
+  }
+
+  if (files.length) {
+    return "file-analysis";
+  }
+
+  return "general";
+}
+
+function normalizeModelName(value: string) {
+  return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+function findRequestedModel(content: string, modelNames: string[]) {
+  const text = content.toLowerCase().trim();
+  const normalizedText = normalizeModelName(text);
+  const startsLikeModelCommand = /^(use|switch|change|set)\b/.test(text);
+
+  const exactModel = modelNames.find((modelName) => {
+    const normalizedModel = normalizeModelName(modelName);
+    const family = normalizeModelName(modelName.split(":")[0] ?? modelName);
+
+    return normalizedText === normalizedModel || normalizedText === family;
+  });
+
+  if (exactModel) {
+    return exactModel;
+  }
+
+  if (!startsLikeModelCommand) {
+    return undefined;
+  }
+
+  return modelNames.find((modelName) => {
+    const normalizedModel = normalizeModelName(modelName);
+    const family = normalizeModelName(modelName.split(":")[0] ?? modelName);
+
+    return (
+      normalizedText.includes(normalizedModel) ||
+      normalizedText.includes(family) ||
+      (family.includes("qwen") && normalizedText.includes("qwen")) ||
+      (family.includes("llama") && normalizedText.includes("llama"))
+    );
+  });
+}
+
 function buildMessages(
   session: ChatSession,
   prompt: string,
-  preset: PresetId,
+  taskMode: TaskMode,
   hardwareProfile: HardwareProfileId,
 ): OllamaMessage[] {
   const runtimeProfile = runtimeProfiles[hardwareProfile];
@@ -658,13 +1031,11 @@ function buildMessages(
     .map((turn) => ({
       role: turn.role,
       content: turn.content,
-    }));
+  }));
 
   const identityPrompt = `
-${presetSystemPrompts[preset]}
+${taskSystemPrompts[taskMode]}
 
-The current mode selection is authoritative for this reply.
-If earlier messages in this chat used a different tone or depth, ignore that and follow the current mode instead.
 ${runtimeProfile.systemNote}
 
 You are Desktop Spotlight AI, a local desktop assistant.
@@ -684,6 +1055,98 @@ Do not claim to be GPT-4, ChatGPT, or an OpenAI model.
   ];
 }
 
+function renderFormattedText(text: string): ReactNode[] {
+  const parts: ReactNode[] = [];
+  let cursor = 0;
+  const whitespacePattern = /\s/;
+
+  function appendText(value: string) {
+    if (!value) return;
+
+    const previous = parts[parts.length - 1];
+
+    if (typeof previous === "string") {
+      parts[parts.length - 1] = previous + value;
+      return;
+    }
+
+    parts.push(value);
+  }
+
+  while (cursor < text.length) {
+    const markerStart = text.indexOf("*", cursor);
+
+    if (markerStart === -1) {
+      appendText(text.slice(cursor));
+      break;
+    }
+
+    appendText(text.slice(cursor, markerStart));
+
+    if (text[markerStart - 1] === "\\") {
+      parts[parts.length - 1] = String(parts[parts.length - 1]).slice(
+        0,
+        -1,
+      );
+      appendText("*");
+      cursor = markerStart + 1;
+      continue;
+    }
+
+    const marker =
+      text.startsWith("***", markerStart)
+        ? "***"
+        : text.startsWith("**", markerStart)
+          ? "**"
+          : "*";
+
+    const contentStart = markerStart + marker.length;
+
+    if (whitespacePattern.test(text[contentStart] ?? "")) {
+      appendText(marker);
+      cursor = contentStart;
+      continue;
+    }
+
+    const contentEnd = text.indexOf(marker, contentStart);
+
+    if (contentEnd === -1) {
+      appendText(marker);
+      cursor = contentStart;
+      continue;
+    }
+
+    const content = text.slice(contentStart, contentEnd);
+
+    if (
+      !content.trim() ||
+      whitespacePattern.test(content[content.length - 1])
+    ) {
+      appendText(marker);
+      cursor = contentStart;
+      continue;
+    }
+
+    const key = `${markerStart}-${contentEnd}`;
+
+    if (marker === "***") {
+      parts.push(
+        <strong key={key}>
+          <em>{content}</em>
+        </strong>,
+      );
+    } else if (marker === "**") {
+      parts.push(<strong key={key}>{content}</strong>);
+    } else {
+      parts.push(<em key={key}>{content}</em>);
+    }
+
+    cursor = contentEnd + marker.length;
+  }
+
+  return parts;
+}
+
 function App() {
   const initialStateRef = useRef(getInitialAppState());
   const initialOllamaEndpoint = useRef(getInitialOllamaEndpoint());
@@ -697,7 +1160,6 @@ function App() {
     cancelChat,
   } = useOllama(initialOllamaEndpoint.current);
 
-  const [preset, setPreset] = useState<PresetId>("balanced");
   const [hardwareProfile, setHardwareProfile] = useState<HardwareProfileId>(
     getInitialHardwareProfile,
   );
@@ -772,9 +1234,6 @@ function App() {
       ? selectedModelName
       : availableModelNames[0] ?? "";
 
-  const selectedPreset =
-    presets.find((option) => option.id === preset) ?? presets[1];
-
   const selectedHardwareProfile =
     hardwareProfiles.find((profile) => profile.id === hardwareProfile) ??
     hardwareProfiles[1];
@@ -817,17 +1276,6 @@ function App() {
   }, [sortedSessions]);
 
   const [isCanceling, setIsCanceling] = useState(false);
-
-  function cyclePreset() {
-    const currentIndex = presets.findIndex(
-      (option) => option.id === preset,
-    );
-
-    const nextPreset =
-      presets[(currentIndex + 1) % presets.length];
-
-    setPreset(nextPreset.id);
-  }
 
   const activeSession = useMemo(() => {
     return (
@@ -945,11 +1393,6 @@ function App() {
     !isGenerating &&
     Boolean(activeModelName) &&
     hasPrompt;
-
-  const canSummarize =
-    !isGenerating &&
-    Boolean(activeModelName) &&
-    attachedFiles.length > 0;
 
   useEffect(() => {
     const saveTimer = window.setTimeout(() => {
@@ -1411,6 +1854,10 @@ function App() {
       visibleContent,
       filesForTurn,
     );
+    const taskMode = detectTaskMode(
+      visibleContent,
+      filesForTurn,
+    );
 
     const messages = buildMessages(
       {
@@ -1419,7 +1866,7 @@ function App() {
         turns: baseTurns,
       },
       modelPrompt,
-      preset,
+      taskMode,
       hardwareProfile,
     );
 
@@ -1551,7 +1998,7 @@ function App() {
     }
   }
 
-  async function sendMessage(summarize = false) {
+  async function sendMessage() {
     const trimmedMessage = message.trim();
 
     if (!trimmedMessage && attachedFiles.length === 0) {
@@ -1569,12 +2016,64 @@ function App() {
 
     const filesForTurn = attachedFiles;
 
-    const visibleContent = summarize
-      ? trimmedMessage
-        ? `Please summarize the attached file(s) and answer: ${trimmedMessage}`
-        : "Please summarize the attached file(s)."
-      : trimmedMessage ||
-        `Attached ${filesForTurn.length} file(s).`;
+    const visibleContent =
+      trimmedMessage ||
+      `Attached ${filesForTurn.length} file(s).`;
+    const requestedModel = trimmedMessage
+      ? findRequestedModel(trimmedMessage, availableModelNames)
+      : undefined;
+
+    if (requestedModel) {
+      const now = Date.now();
+      const userTurn: ChatTurn = {
+        id: `user-${now}`,
+        role: "user",
+        content: visibleContent,
+        files: filesForTurn,
+      };
+      const assistantTurn: ChatTurn = {
+        id: `assistant-${now}`,
+        role: "assistant",
+        content:
+          requestedModel === activeModelName
+            ? `Already using ${requestedModel}.`
+            : `Switched to ${requestedModel}.`,
+      };
+
+      setSelectedModelName(requestedModel);
+      setMessage("");
+      setAttachedFiles([]);
+      setSelectedPreviewFileId(null);
+      setIsPreviewOpen(false);
+
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+
+      setSessions((current) =>
+        current.map((session) => {
+          if (session.id !== activeSession.id) {
+            return session;
+          }
+
+          return {
+            ...session,
+            title:
+              session.title === "New chat"
+                ? `Using ${requestedModel}`.slice(0, 42)
+                : session.title,
+            turns: [
+              ...session.turns,
+              userTurn,
+              assistantTurn,
+            ],
+            updatedAt: Date.now(),
+          };
+        }),
+      );
+
+      return;
+    }
 
     setAttachedFiles([]);
     setSelectedPreviewFileId(null);
@@ -1644,6 +2143,8 @@ function App() {
   function handleDragEnter(
     event: DragEvent<HTMLElement>,
   ) {
+    if (!hasDraggedFiles(event)) return;
+
     event.preventDefault();
 
     dragDepthRef.current += 1;
@@ -1653,6 +2154,8 @@ function App() {
   function handleDragOver(
     event: DragEvent<HTMLElement>,
   ) {
+    if (!hasDraggedFiles(event)) return;
+
     event.preventDefault();
     event.dataTransfer.dropEffect = "copy";
   }
@@ -1660,6 +2163,8 @@ function App() {
   function handleDragLeave(
     event: DragEvent<HTMLElement>,
   ) {
+    if (!hasDraggedFiles(event)) return;
+
     event.preventDefault();
 
     dragDepthRef.current = Math.max(
@@ -1673,12 +2178,16 @@ function App() {
   }
 
   function handleDrop(event: DragEvent<HTMLElement>) {
+    if (!hasDraggedFiles(event)) return;
+
     event.preventDefault();
 
     dragDepthRef.current = 0;
     setIsDragging(false);
 
-    void addFiles(event.dataTransfer.files);
+    if (event.dataTransfer.files.length) {
+      void addFiles(event.dataTransfer.files);
+    }
   }
 
   const setupStatusLabel = error
@@ -1705,8 +2214,10 @@ function App() {
           aria-hidden="true"
         >
           <div className="drag-overlay-panel">
-            <strong>Drop file here</strong>
-            <span>Release to attach your file</span>
+            <strong>Drop files here</strong>
+            <span>
+              Text, Markdown, RTF, and DOCX files will include a preview
+            </span>
           </div>
         </div>
       ) : null}
@@ -2019,7 +2530,7 @@ function App() {
             ref={fileInputRef}
             type="file"
             multiple
-            accept=".txt,.md,text/plain,text/markdown"
+            accept=".txt,.md,.rtf,.docx,text/plain,text/markdown,text/rtf,application/rtf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             onChange={(event) => {
               void addFiles(
                 event.currentTarget.files ?? [],
@@ -2162,7 +2673,7 @@ function App() {
                   <strong>{selectedHardwareProfile.label}</strong>
                   <span>{selectedHardwareProfile.description}</span>
                   <small>
-                    Sends up to {runtimeProfile.previewCharacters.toLocaleString()} file characters and {runtimeProfile.recentMessageCount} recent messages. Response style still uses {selectedPreset.label}.
+                    Sends up to {runtimeProfile.previewCharacters.toLocaleString()} file characters and {runtimeProfile.recentMessageCount} recent messages. Response style is selected automatically by task.
                   </small>
                 </div>
               </section>
@@ -2373,7 +2884,9 @@ function App() {
                             : undefined
                         }
                       >
-                        {turn.content}
+                        {isStreamingTurn
+                          ? turn.content
+                          : renderFormattedText(turn.content)}
                       </p>
 
                       {canRegenerateTurn ? (
@@ -2463,17 +2976,6 @@ function App() {
                 onKeyDown={handleKeyDown}
               />
 
-              <button
-                type="button"
-                className="preset-pill-button"
-                disabled={isGenerating}
-                aria-label={`Response style: ${selectedPreset.label}`}
-                title={selectedPreset.description}
-                onClick={cyclePreset}
-              >
-                {selectedPreset.label}
-              </button>
-
               {isGenerating ? (
                 <button
                   type="button"
@@ -2484,19 +2986,6 @@ function App() {
                   }}
                 >
                   Cancel
-                </button>
-              ) : null}
-
-              {attachedFiles.length ? (
-                <button
-                  type="button"
-                  className="summarize-action-button composer-summarize-button"
-                  disabled={!canSummarize}
-                  onClick={() => {
-                    void sendMessage(true);
-                  }}
-                >
-                  Summarize
                 </button>
               ) : null}
 
