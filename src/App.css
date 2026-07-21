@@ -102,6 +102,23 @@ h3 {
   --send-bg: #e3e3e3;
   --send-text: #1f1f1f;
 
+  --workspace-padding: 14px;
+  --sidebar-padding-y: 16px;
+  --sidebar-padding-x: 10px;
+  --card-padding: 18px;
+  --panel-padding: 16px;
+  --canvas-padding: 14px;
+  --response-padding: 12px;
+  --control-height: 36px;
+  --send-button-padding: 12px;
+  --send-font-size: 0.83rem;
+  --attach-button-size: 30px;
+  --sidebar-button-size: 30px;
+  --new-chat-button-size: 30px;
+  --history-options-size: 26px;
+  --icon-size: 16px;
+  --compact-heading-size: 0.72rem;
+
   width: 100%;
   min-width: 0;
   height: 100dvh;
@@ -169,8 +186,8 @@ h3 {
 }
 
 .ui-icon {
-  width: 16px;
-  height: 16px;
+  width: var(--icon-size);
+  height: var(--icon-size);
 
   display: block;
 }
@@ -197,7 +214,7 @@ h3 {
   min-width: 0;
   min-height: 0;
 
-  padding: 16px 10px;
+  padding: var(--sidebar-padding-y) var(--sidebar-padding-x);
 
   display: flex;
   flex-direction: column;
@@ -212,7 +229,9 @@ h3 {
 }
 
 .sidebar.collapsed {
-  padding: 12px 8px;
+  padding:
+    calc(var(--sidebar-padding-y) - 4px)
+    calc(var(--sidebar-padding-x) - 2px);
   gap: 0;
 }
 
@@ -295,8 +314,8 @@ h3 {
 .sidebar-collapse-button {
   flex: 0 0 auto;
 
-  width: 30px;
-  height: 30px;
+  width: var(--sidebar-button-size);
+  height: var(--sidebar-button-size);
   padding: 0;
 
   display: grid;
@@ -409,8 +428,8 @@ h3 {
 .sidebar-new-button {
   flex: 0 0 auto;
 
-  width: 30px;
-  height: 30px;
+  width: var(--new-chat-button-size);
+  height: var(--new-chat-button-size);
   padding: 0;
 
   display: grid;
@@ -540,8 +559,8 @@ h3 {
 }
 
 .history-options-button {
-  width: 26px;
-  height: 26px;
+  width: var(--history-options-size);
+  height: var(--history-options-size);
   padding: 0;
 
   display: grid;
@@ -632,7 +651,7 @@ h3 {
   min-width: 0;
   min-height: 0;
 
-  padding: 14px;
+  padding: var(--workspace-padding);
 
   display: flex;
   flex-direction: column;
@@ -728,7 +747,7 @@ h3 {
 }
 
 .model-select-trigger {
-  height: 36px;
+  height: var(--control-height);
 
   border: 1px solid transparent;
   border-radius: 999px;
@@ -828,7 +847,7 @@ h3 {
 .settings-card {
   flex: 1 1 auto;
 
-  padding: 18px;
+  padding: var(--card-padding);
 
   display: grid;
   align-content: start;
@@ -864,7 +883,7 @@ h3 {
 .settings-close-button,
 .settings-apply-button,
 .settings-secondary-button {
-  min-height: 36px;
+  min-height: var(--control-height);
   padding: 0 12px;
 
   display: inline-flex;
@@ -890,7 +909,7 @@ h3 {
 }
 
 .settings-panel {
-  padding: 16px;
+  padding: var(--panel-padding);
 
   display: grid;
   gap: 14px;
@@ -928,7 +947,7 @@ h3 {
 .settings-input,
 .settings-select {
   width: 100%;
-  min-height: 40px;
+  min-height: calc(var(--control-height) + 4px);
   padding: 0 12px;
 
   border: 1px solid var(--border);
@@ -1075,7 +1094,7 @@ h3 {
   min-width: 0;
   min-height: 0;
 
-  padding: 14px;
+  padding: var(--canvas-padding);
 
   display: flex;
   flex-direction: column;
@@ -1132,7 +1151,7 @@ h3 {
 
 .active-chat-heading span {
   color: var(--muted);
-  font-size: 0.72rem;
+  font-size: var(--compact-heading-size);
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -1140,7 +1159,7 @@ h3 {
 
 .active-chat-heading small {
   color: var(--muted);
-  font-size: 0.72rem;
+  font-size: var(--compact-heading-size);
 }
 
 .file-preview-panel {
@@ -1395,7 +1414,7 @@ h3 {
   flex: 1 1 auto;
   min-width: 0;
   min-height: 0;
-  padding: 12px;
+  padding: var(--response-padding);
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1444,7 +1463,9 @@ h3 {
   flex: 0 0 auto;
   width: fit-content;
   max-width: min(86%, 760px);
-  padding: 11px 13px;
+  padding:
+    calc(var(--response-padding) - 1px)
+    calc(var(--response-padding) + 1px);
 
   display: block;
 
@@ -1672,37 +1693,6 @@ h3 {
   background: var(--hover);
 }
 
-.summarize-action-button {
-  flex: 0 0 auto;
-
-  min-height: 34px;
-  padding: 0 12px;
-
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-
-  border: 1px solid var(--border);
-  border-radius: 999px;
-
-  color: var(--text);
-  background: var(--surface);
-
-  font-size: 0.78rem;
-  font-weight: 600;
-  white-space: nowrap;
-}
-
-.composer-summarize-button {
-  min-width: 88px;
-  height: 36px;
-}
-
-.summarize-action-button:hover:not(:disabled) {
-  border-color: color-mix(in srgb, var(--accent) 18%, var(--border));
-  background: var(--hover);
-}
-
 .composer-shell {
   width: 100%;
   min-width: 0;
@@ -1740,8 +1730,8 @@ h3 {
 }
 
 .attach-button {
-  width: 30px;
-  height: 30px;
+  width: var(--attach-button-size);
+  height: var(--attach-button-size);
   padding: 0;
 
   display: grid;
@@ -1809,44 +1799,9 @@ h3 {
   border-radius: 999px;
 }
 
-.preset-pill-button {
-  flex: 0 0 auto;
-  min-width: 62px;
-  height: 36px;
-  padding: 0 10px;
-
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--surface);
-  color: var(--muted);
-
-  white-space: nowrap;
-  appearance: none;
-
-  font-size: 0.76rem;
-  font-weight: 600;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.preset-pill-button:hover:not(:disabled) {
-  color: var(--text);
-  border-color: color-mix(in srgb, var(--accent) 24%, var(--border));
-  background: var(--hover);
-}
-
-.preset-pill-button:disabled {
-  opacity: 0.42;
-  cursor: not-allowed;
-}
-
 .send-button {
-  height: 36px;
-  padding: 0 12px;
+  height: var(--control-height);
+  padding: 0 var(--send-button-padding);
 
   border-radius: 999px;
 
@@ -1854,7 +1809,7 @@ h3 {
   text-overflow: ellipsis;
   white-space: nowrap;
 
-  font-size: 0.83rem;
+  font-size: var(--send-font-size);
   font-weight: 500;
 
   display: inline-flex;
@@ -1864,8 +1819,6 @@ h3 {
 }
 
 .composer-shell.expanded .attach-button,
-.composer-shell.expanded .preset-pill-button,
-.composer-shell.expanded .composer-summarize-button,
 .composer-shell.expanded .cancel-button.composer-cancel-button,
 .composer-shell.expanded .send-button {
   margin-bottom: 2px;
@@ -1956,8 +1909,6 @@ h3 {
 .sidebar-settings-button:focus-visible,
 .model-select-trigger:focus-visible,
 .attach-button:focus-visible,
-.summarize-action-button:focus-visible,
-.preset-pill-button:focus-visible,
 .cancel-button:focus-visible,
 .send-button:focus-visible,
 .settings-close-button:focus-visible,
@@ -1981,13 +1932,11 @@ h3 {
 
 @media (max-width: 1080px) {
   .app-shell {
+    --workspace-padding: 12px;
+
     grid-template-columns:
       168px
       minmax(0, 1fr);
-  }
-
-  .workspace {
-    padding: 12px;
   }
 
   .settings-grid {
@@ -1998,6 +1947,19 @@ h3 {
 
 @media (max-width: 720px) {
   .app-shell {
+    --workspace-padding: 10px;
+    --sidebar-padding-y: 12px;
+    --sidebar-padding-x: 7px;
+    --card-padding: 14px;
+    --panel-padding: 13px;
+    --canvas-padding: 11px;
+    --control-height: 34px;
+    --send-button-padding: 7px;
+    --send-font-size: 0.78rem;
+    --new-chat-button-size: 26px;
+    --history-options-size: 21px;
+    --icon-size: 15px;
+
     grid-template-columns:
       86px
       minmax(0, 1fr);
@@ -2007,22 +1969,13 @@ h3 {
     grid-template-columns: 52px minmax(0, 1fr);
   }
 
-  .sidebar {
-    padding: 12px 7px;
-  }
-
   .sidebar-header h2 {
     font-size: 0.7rem;
     text-align: center;
   }
 
-  .sidebar-new-button {
-    width: 26px;
-    height: 26px;
-  }
-
   .sidebar-settings-button {
-    min-height: 34px;
+    min-height: var(--control-height);
     padding: 0 8px;
     font-size: 0.78rem;
   }
@@ -2049,24 +2002,11 @@ h3 {
     top: 50%;
     right: 1px;
 
-    width: 21px;
-    height: 21px;
+    width: var(--history-options-size);
+    height: var(--history-options-size);
     opacity: 1;
 
     transform: translateY(-50%);
-  }
-
-  .sidebar-collapse-button .ui-icon,
-  .sidebar-new-button .ui-icon,
-  .history-options-button .ui-icon,
-  .attach-button .ui-icon,
-  .send-button .ui-icon {
-    width: 15px;
-    height: 15px;
-  }
-
-  .workspace {
-    padding: 10px;
   }
 
   .header-toolbar {
@@ -2079,7 +2019,6 @@ h3 {
   }
 
   .model-select-trigger {
-    height: 34px;
     padding: 0 11px;
     font-size: 0.78rem;
   }
@@ -2089,7 +2028,6 @@ h3 {
   }
 
   .chat-canvas {
-    padding: 11px;
     border-radius: 18px;
   }
 
@@ -2106,12 +2044,7 @@ h3 {
   }
 
   .settings-card {
-    padding: 14px;
     border-radius: 18px;
-  }
-
-  .settings-panel {
-    padding: 13px;
   }
 
   .turn {
@@ -2123,48 +2056,44 @@ h3 {
     padding: 5px 6px;
   }
 
-  .preset-pill-button,
-  .composer-summarize-button,
   .send-button {
-    height: 34px;
     min-width: 58px;
-    padding: 0 7px;
-    font-size: 0.78rem;
   }
 }
 
 @media (max-width: 520px) {
-  .label-full {
-    display: none;
-  }
-
-  .label-short {
-    display: inline;
+  .app-shell {
+    --send-button-padding: 5px;
+    --send-font-size: 0.74rem;
   }
 
   .active-chat-heading small {
     display: none;
   }
 
-  .preset-pill-button,
-  .composer-summarize-button,
   .cancel-button.composer-cancel-button,
   .send-button {
     min-width: 54px;
-    padding: 0 5px;
-    font-size: 0.74rem;
   }
 }
 
 @media (max-width: 420px) {
   .app-shell {
+    --workspace-padding: 8px;
+    --sidebar-padding-y: 10px;
+    --sidebar-padding-x: 5px;
+    --canvas-padding: 9px;
+    --response-padding: 9px;
+    --control-height: 32px;
+    --send-font-size: 0.7rem;
+    --attach-button-size: 27px;
+    --sidebar-button-size: 28px;
+    --new-chat-button-size: 23px;
+    --icon-size: 14px;
+
     grid-template-columns:
       70px
       minmax(0, 1fr);
-  }
-
-  .sidebar {
-    padding: 10px 5px;
   }
 
   .sidebar-header {
@@ -2175,21 +2104,12 @@ h3 {
     font-size: 0.64rem;
   }
 
-  .sidebar-new-button {
-    width: 23px;
-    height: 23px;
-  }
-
   .sidebar-settings-button {
-    min-height: 32px;
+    min-height: var(--control-height);
   }
 
   .history-item-title {
     font-size: 0.64rem;
-  }
-
-  .workspace {
-    padding: 8px;
   }
 
   .workspace-header {
@@ -2212,14 +2132,8 @@ h3 {
   }
 
   .model-select-trigger {
-    height: 32px;
     font-size: 0.74rem;
     padding: 0 10px;
-  }
-
-  .sidebar-collapse-button {
-    width: 28px;
-    height: 28px;
   }
 
   .sidebar-collapsed-list {
@@ -2234,21 +2148,8 @@ h3 {
     font-size: 0.5rem;
   }
 
-  .sidebar-collapse-button .ui-icon,
-  .sidebar-new-button .ui-icon,
-  .history-options-button .ui-icon,
-  .attach-button .ui-icon,
-  .send-button .ui-icon {
-    width: 14px;
-    height: 14px;
-  }
-
   .model-select-trigger {
     min-width: min(150px, 44vw);
-  }
-
-  .chat-canvas {
-    padding: 9px;
   }
 
   .settings-header {
@@ -2288,13 +2189,8 @@ h3 {
     font-size: 0.8rem;
   }
 
-  .response-panel {
-    padding: 9px;
-  }
-
   .turn {
     max-width: 96%;
-    padding: 8px 9px;
     font-size: 0.86rem;
   }
 
@@ -2303,16 +2199,8 @@ h3 {
     min-height: 48px;
   }
 
-  .attach-button {
-    width: 27px;
-    height: 27px;
-  }
-
-  .preset-pill-button,
   .send-button {
-    height: 32px;
-    padding: 0 5px;
-    font-size: 0.7rem;
+    padding: 0 var(--send-button-padding);
   }
 }
 

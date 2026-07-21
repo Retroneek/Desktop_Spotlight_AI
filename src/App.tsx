@@ -2,13 +2,14 @@ import {
   type DragEvent,
   type KeyboardEvent,
   type ReactNode,
+  type RefObject,
   useEffect,
   useLayoutEffect,
   useMemo,
   useRef,
   useState,
 } from "react";
-import { useOllama } from "./services/ollama";
+import { type OllamaChatOptions, useOllama } from "./services/ollama";
 import "./App.css";
 
 const hardwareProfiles = [
@@ -143,43 +144,30 @@ const maxMessageHeight = lineHeight * maxMessageLines + verticalPadding;
 const taskSystemPrompts: Record<TaskMode, string> = {
   coding: `
 Help with coding work in a practical, collaborative way.
-Give concrete fixes and code when useful, with enough explanation to make the change understandable.
-When reviewing or debugging, identify the likely cause and suggest a good next step.
-Avoid broad rewrites unless the user asks for them.
-Prioritize attached file content when files are included.
-Do not invent information that is not present.
+Prefer the smallest useful fix, explain the why briefly, and include code only when it helps.
+When debugging, name the likely cause first, then the next step.
 `.trim(),
 
   reasoning: `
-Help reason through the request carefully in a normal conversational tone.
-Share the useful reasoning, tradeoffs, and conclusion without becoming stiff or over-formal.
-Use structure when it helps the answer scan well.
-Prioritize attached file content when files are included.
-Do not invent information that is not present.
+Think through tradeoffs clearly, then land on a practical recommendation.
+Keep the reasoning readable and conversational instead of formal.
 `.trim(),
 
   writing: `
 Help with writing in a natural, polished voice.
-Help draft, revise, summarize, and polish text while preserving the user's intent.
-Keep output clean and ready to use, but do not make it sound generic.
-Ask a clarifying question only when the missing detail would materially change the result.
-Prioritize attached file content when files are included.
-Do not invent information that is not present.
+Preserve the user's intent and make the result sound human, specific, and ready to use.
+Avoid stiff filler and generic polished phrasing.
 `.trim(),
 
   "file-analysis": `
-Help analyze attached files clearly and naturally.
-Use attached file content as the primary source.
-Summarize, answer questions, and extract action items with concise evidence from the file when useful.
-Say when a detail is not present in the attached content.
-Do not invent information that is not present.
+Use attached file content as the source of truth.
+When the user asks for a summary, compress the file into the main ideas instead of walking through every section.
+For questions, answer directly and mention file details only when they support the answer.
 `.trim(),
 
   general: `
-Help with the user's request directly and naturally.
-Give clear, practical answers with enough personality and context to feel useful.
-Prioritize attached file content when files are included.
-Do not invent information that is not present.
+Answer directly and naturally.
+Be useful, specific, and relaxed; avoid sounding like a product script.
 `.trim(),
 };
 
@@ -915,16 +903,27 @@ function buildPrompt(content: string, files: AttachedFile[]) {
     })
     .join("\n\n---\n\n");
 
-  return `${content}
+  return `User request:
+${content}
 
 Attached file context:
 
 ${fileContext}`;
 }
 
+function isSummaryRequest(content: string) {
+  return /\b(summarize|summarise|summary|sum up|tldr|tl;dr|quick recap|overview|what is this about|what's this about)\b/i.test(
+    content,
+  );
+}
+
 function detectTaskMode(content: string, files: AttachedFile[]): TaskMode {
   const text = content.toLowerCase();
   const fileNames = files.map((file) => file.name.toLowerCase()).join(" ");
+
+  if (files.length && isSummaryRequest(content)) {
+    return "file-analysis";
+  }
 
   if (
     /\b(code|coding|bug|debug|typescript|javascript|react|tauri|rust|python|function|component|api|error|stack trace|compile|build|test|refactor)\b/.test(
@@ -1002,8 +1001,11 @@ function buildMessages(
   prompt: string,
   taskMode: TaskMode,
   hardwareProfile: HardwareProfileId,
+  content: string,
+  files: AttachedFile[],
 ): OllamaMessage[] {
   const runtimeProfile = runtimeProfiles[hardwareProfile];
+  const wantsSummary = files.length > 0 && isSummaryRequest(content);
 
   const recentMessages: OllamaMessage[] = session.turns
     .filter((turn) => turn.content.trim())
@@ -1018,9 +1020,14 @@ ${taskSystemPrompts[taskMode]}
 
 ${runtimeProfile.systemNote}
 
-Sound like a normal modern AI assistant: conversational, thoughtful, and specific.
-It is okay to be warm, lightly expressive, and a little fuller when the user would benefit from it.
-Avoid generic canned phrases, corporate product language, and self-descriptions.
+${wantsSummary ? "For summary requests, default to a short useful summary: 2-4 bullets or one compact paragraph. Do not restate the file section-by-section unless the user asks for detail." : ""}
+
+Style:
+- Sound like a normal helpful assistant in a chat, not a scripted desktop product.
+- Be concise by default. Expand only when the task is complex or the user asks for depth.
+- Avoid generic openings, corporate language, moralizing, and self-descriptions.
+- Use attached file content when files are included, and say when the answer is not in the file.
+- Do not invent details.
 Do not introduce yourself or recite what kind of assistant you are.
 If directly asked what you are running on, say you are using the selected local Ollama model.
 Do not claim to be GPT-4, ChatGPT, or an OpenAI model.
@@ -1037,6 +1044,52 @@ Do not claim to be GPT-4, ChatGPT, or an OpenAI model.
       content: prompt,
     },
   ];
+}
+
+function buildGenerationOptions(
+  taskMode: TaskMode,
+  content: string,
+  files: AttachedFile[],
+): OllamaChatOptions {
+  const wantsSummary = files.length > 0 && isSummaryRequest(content);
+
+  if (wantsSummary) {
+    return {
+      temperature: 0.25,
+      top_p: 0.85,
+      repeat_penalty: 1.12,
+      num_ctx: 4096,
+      num_predict: 360,
+    };
+  }
+
+  if (taskMode === "coding" || taskMode === "file-analysis") {
+    return {
+      temperature: 0.35,
+      top_p: 0.9,
+      repeat_penalty: 1.1,
+      num_ctx: 4096,
+      num_predict: 900,
+    };
+  }
+
+  if (taskMode === "writing") {
+    return {
+      temperature: 0.65,
+      top_p: 0.92,
+      repeat_penalty: 1.06,
+      num_ctx: 4096,
+      num_predict: 1000,
+    };
+  }
+
+  return {
+    temperature: 0.5,
+    top_p: 0.9,
+    repeat_penalty: 1.08,
+    num_ctx: 4096,
+    num_predict: 700,
+  };
 }
 
 function renderFormattedText(text: string): ReactNode[] {
@@ -1131,9 +1184,127 @@ function renderFormattedText(text: string): ReactNode[] {
   return parts;
 }
 
+type MessageComposerProps = {
+  attachedFiles: AttachedFile[];
+  canSend: boolean;
+  isExpanded: boolean;
+  isGenerating: boolean;
+  message: string;
+  messageRef: RefObject<HTMLTextAreaElement | null>;
+  onAttach: () => void;
+  onCancel: () => void;
+  onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
+  onMessageChange: (value: string) => void;
+  onRemoveFile: (fileId: string) => void;
+  onSend: () => void;
+};
+
+function MessageComposer({
+  attachedFiles,
+  canSend,
+  isExpanded,
+  isGenerating,
+  message,
+  messageRef,
+  onAttach,
+  onCancel,
+  onKeyDown,
+  onMessageChange,
+  onRemoveFile,
+  onSend,
+}: MessageComposerProps) {
+  return (
+    <div className="composer-stack">
+      {attachedFiles.length ? (
+        <div
+          className="pending-attachments"
+          aria-label="Files ready to send"
+        >
+          {attachedFiles.map((file) => (
+            <div
+              key={file.id}
+              className="pending-attachment"
+            >
+              <div className="pending-file-details">
+                <strong>{file.name}</strong>
+                <span>{file.sizeLabel}</span>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => onRemoveFile(file.id)}
+                aria-label={`Remove ${file.name}`}
+              >
+                ×
+              </button>
+            </div>
+          ))}
+        </div>
+      ) : null}
+
+      <div
+        className={`composer-shell${isExpanded ? " expanded" : ""}${
+          isGenerating ? " generating" : ""
+        }`}
+        aria-label="Message composer"
+      >
+        <button
+          type="button"
+          className="attach-button"
+          aria-label="Attach file"
+          disabled={isGenerating}
+          onClick={onAttach}
+        >
+          <AttachIcon className="ui-icon" />
+        </button>
+
+        <textarea
+          ref={messageRef}
+          className="prompt-box"
+          placeholder="Ask anything or drop in a file"
+          rows={1}
+          value={message}
+          disabled={isGenerating}
+          onChange={(event) =>
+            onMessageChange(event.currentTarget.value)
+          }
+          onKeyDown={onKeyDown}
+        />
+
+        {isGenerating ? (
+          <button
+            type="button"
+            className="cancel-button composer-cancel-button"
+            onClick={onCancel}
+          >
+            Cancel
+          </button>
+        ) : null}
+
+        <button
+          type="button"
+          className="send-button"
+          aria-label="Send"
+          disabled={!canSend}
+          onClick={onSend}
+        >
+          <SendIcon className="ui-icon" />
+          <span>{isGenerating ? "Working" : "Send"}</span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function App() {
   const initialStateRef = useRef(getInitialAppState());
   const initialOllamaEndpoint = useRef(getInitialOllamaEndpoint());
+  const [ollamaEndpoint, setOllamaEndpoint] = useState(
+    initialOllamaEndpoint.current,
+  );
+  const [endpointDraft, setEndpointDraft] = useState(
+    initialOllamaEndpoint.current,
+  );
 
   const {
     models,
@@ -1142,7 +1313,8 @@ function App() {
     error,
     refreshModels,
     cancelChat,
-  } = useOllama(initialOllamaEndpoint.current);
+    warmModel,
+  } = useOllama(ollamaEndpoint);
 
   const [hardwareProfile, setHardwareProfile] = useState<HardwareProfileId>(
     getInitialHardwareProfile,
@@ -1154,12 +1326,6 @@ function App() {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [selectedModelName, setSelectedModelName] = useState(
     getInitialSelectedModel,
-  );
-  const [ollamaEndpoint, setOllamaEndpoint] = useState(
-    initialOllamaEndpoint.current,
-  );
-  const [endpointDraft, setEndpointDraft] = useState(
-    initialOllamaEndpoint.current,
   );
   const [isModelMenuOpen, setIsModelMenuOpen] = useState(false);
 
@@ -1205,6 +1371,7 @@ function App() {
   const streamedTextRef = useRef("");
   const streamFrameRef = useRef<number | null>(null);
   const stickToBottomRef = useRef(true);
+  const warmedModelRef = useRef("");
 
   const availableModelNames = useMemo(() => {
     return getModelList(models)
@@ -1455,6 +1622,33 @@ function App() {
   useEffect(() => {
     localStorage.setItem(selectedModelStorageKey, activeModelName);
   }, [activeModelName]);
+
+  useEffect(() => {
+    if (!activeModelName || isGenerating) {
+      return;
+    }
+
+    const warmKey = `${ollamaEndpoint}|${activeModelName}`;
+
+    if (warmedModelRef.current === warmKey) {
+      return;
+    }
+
+    let didCancel = false;
+
+    const warmTimer = window.setTimeout(() => {
+      void warmModel(activeModelName).then((didWarm) => {
+        if (didWarm && !didCancel) {
+          warmedModelRef.current = warmKey;
+        }
+      });
+    }, 700);
+
+    return () => {
+      didCancel = true;
+      window.clearTimeout(warmTimer);
+    };
+  }, [activeModelName, isGenerating, ollamaEndpoint, warmModel]);
 
   useEffect(() => {
     localStorage.setItem(
@@ -1824,6 +2018,11 @@ function App() {
       visibleContent,
       filesForTurn,
     );
+    const generationOptions = buildGenerationOptions(
+      taskMode,
+      visibleContent,
+      filesForTurn,
+    );
 
     const messages = buildMessages(
       {
@@ -1834,6 +2033,8 @@ function App() {
       modelPrompt,
       taskMode,
       hardwareProfile,
+      visibleContent,
+      filesForTurn,
     );
 
     const now = Date.now();
@@ -1909,6 +2110,7 @@ function App() {
           streamedTextRef.current += token;
           queueStreamPaint();
         },
+        generationOptions,
       );
 
       completedText =
@@ -2851,94 +3053,25 @@ function App() {
             </div>
           </div>
 
-          <div className="composer-stack">
-            {attachedFiles.length ? (
-              <div
-                className="pending-attachments"
-                aria-label="Files ready to send"
-              >
-                {attachedFiles.map((file) => (
-                  <div
-                    key={file.id}
-                    className="pending-attachment"
-                  >
-                    <div className="pending-file-details">
-                      <strong>{file.name}</strong>
-                      <span>{file.sizeLabel}</span>
-                    </div>
-
-                    <button
-                      type="button"
-                      onClick={() =>
-                        removeFile(file.id)
-                      }
-                      aria-label={`Remove ${file.name}`}
-                    >
-                      ×
-                    </button>
-                  </div>
-                ))}
-              </div>
-            ) : null}
-
-            <div
-              className={`composer-shell${
-                isComposerExpanded ? " expanded" : ""
-              }${
-                isGenerating ? " generating" : ""
-              }`}
-              aria-label="Message composer"
-            >
-              <button
-                type="button"
-                className="attach-button"
-                aria-label="Attach file"
-                disabled={isGenerating}
-                onClick={openFilePicker}
-              >
-                <AttachIcon className="ui-icon" />
-              </button>
-
-              <textarea
-                ref={messageRef}
-                className="prompt-box"
-                placeholder="Message Desktop Spotlight AI"
-                rows={1}
-                value={message}
-                disabled={isGenerating}
-                onChange={(event) =>
-                  setMessage(event.currentTarget.value)
-                }
-                onKeyDown={handleKeyDown}
-              />
-
-              {isGenerating ? (
-                <button
-                  type="button"
-                  className="cancel-button composer-cancel-button"
-                  onClick={() => {
-                    setIsCanceling(true);
-                    cancelChat();
-                  }}
-                >
-                  Cancel
-                </button>
-              ) : null}
-
-              <button
-                type="button"
-                className="send-button"
-                aria-label="Send"
-                disabled={!canSend}
-                onClick={() =>
-                  void sendMessage()
-                }
-              >
-                <SendIcon className="ui-icon" />
-                <span>{isGenerating ? "Working" : "Send"}</span>
-              </button>
-            </div>
-          </div>
+          <MessageComposer
+            attachedFiles={attachedFiles}
+            canSend={canSend}
+            isExpanded={isComposerExpanded}
+            isGenerating={isGenerating}
+            message={message}
+            messageRef={messageRef}
+            onAttach={openFilePicker}
+            onCancel={() => {
+              setIsCanceling(true);
+              cancelChat();
+            }}
+            onKeyDown={handleKeyDown}
+            onMessageChange={setMessage}
+            onRemoveFile={removeFile}
+            onSend={() => {
+              void sendMessage();
+            }}
+          />
         </section>
         )}
       </section>

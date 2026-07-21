@@ -14,8 +14,20 @@ export type OllamaChatMessage = {
   content: string;
 };
 
+export type OllamaChatOptions = {
+  temperature?: number;
+  top_p?: number;
+  repeat_penalty?: number;
+  num_ctx?: number;
+  num_predict?: number;
+};
+
 type TagsResponse = {
   models?: OllamaModel[];
+};
+
+type GenerateResponse = {
+  error?: string;
 };
 
 type ChatStreamChunk = {
@@ -76,11 +88,44 @@ export function useOllama(baseUrl = DEFAULT_OLLAMA_BASE_URL) {
     void refreshModels();
   }, [refreshModels]);
 
+  const warmModel = useCallback(
+    async (model: string) => {
+      const selectedModel = model.trim();
+      if (!selectedModel) return false;
+
+      try {
+        const response = await fetch(`${baseUrl}/api/generate`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: selectedModel,
+            prompt: "",
+            stream: false,
+            keep_alive: "10m",
+          }),
+        });
+
+        if (!response.ok) {
+          return false;
+        }
+
+        const data = (await response.json()) as GenerateResponse;
+        return !data.error;
+      } catch {
+        return false;
+      }
+    },
+    [baseUrl],
+  );
+
   const streamChat = useCallback(
     async (
       messagesOrPrompt: OllamaChatMessage[] | string,
       model: string,
       onChunk: (chunk: string) => void,
+      options?: OllamaChatOptions,
     ) => {
       const selectedModel = model.trim();
 
@@ -115,6 +160,7 @@ export function useOllama(baseUrl = DEFAULT_OLLAMA_BASE_URL) {
             model: selectedModel,
             messages,
             stream: true,
+            options,
           }),
           signal: controller.signal,
         });
@@ -204,5 +250,6 @@ export function useOllama(baseUrl = DEFAULT_OLLAMA_BASE_URL) {
     refreshModels,
     cancelChat,
     streamChat,
+    warmModel,
   };
 }
