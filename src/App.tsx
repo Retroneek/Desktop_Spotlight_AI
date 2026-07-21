@@ -1,6 +1,7 @@
 import {
   type DragEvent,
   type KeyboardEvent,
+  type ReactNode,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -38,25 +39,25 @@ const runtimeProfiles = {
     previewCharacters: 1200,
     recentMessageCount: 6,
     systemNote:
-      "Optimize for smaller local models. Keep context tight, prefer shorter answers, and avoid unnecessary elaboration.",
+      "Keep responses reasonably efficient for smaller local models, but still sound conversational and helpful.",
   },
   balanced: {
     previewCharacters: 2500,
     recentMessageCount: 12,
     systemNote:
-      "Balance context size with responsiveness for normal local desktop use.",
+      "Balance responsiveness with enough context and detail to feel useful.",
   },
   "high-quality": {
     previewCharacters: 5000,
     recentMessageCount: 18,
     systemNote:
-      "Use the fuller available context and provide more complete reasoning when it helps the user.",
+      "Use fuller context and provide richer explanations when they would help.",
   },
   custom: {
     previewCharacters: 7000,
     recentMessageCount: 20,
     systemNote:
-      "The user selected a custom local setup. Use the broader available context, but stay grounded in the supplied files and chat history.",
+      "Use the broader available context, while staying grounded in the supplied files and chat history.",
   },
 } satisfies Record<
   HardwareProfileId,
@@ -141,34 +142,33 @@ const maxMessageHeight = lineHeight * maxMessageLines + verticalPadding;
 
 const taskSystemPrompts: Record<TaskMode, string> = {
   coding: `
-You are Desktop Spotlight AI, a focused local coding assistant.
-Prioritize direct fixes, concrete code, and short explanations.
-When reviewing or debugging, identify the likely cause first, then give the smallest practical change.
+Help with coding work in a practical, collaborative way.
+Give concrete fixes and code when useful, with enough explanation to make the change understandable.
+When reviewing or debugging, identify the likely cause and suggest a good next step.
 Avoid broad rewrites unless the user asks for them.
 Prioritize attached file content when files are included.
 Do not invent information that is not present.
 `.trim(),
 
   reasoning: `
-You are Desktop Spotlight AI, a careful local reasoning assistant.
-Think through the problem, but present only the useful reasoning and final answer.
-Use concise structure for tradeoffs, comparisons, calculations, or decisions.
-Prefer the shortest reliable path over exhaustive exploration.
+Help reason through the request carefully in a normal conversational tone.
+Share the useful reasoning, tradeoffs, and conclusion without becoming stiff or over-formal.
+Use structure when it helps the answer scan well.
 Prioritize attached file content when files are included.
 Do not invent information that is not present.
 `.trim(),
 
   writing: `
-You are Desktop Spotlight AI, a practical local writing assistant.
+Help with writing in a natural, polished voice.
 Help draft, revise, summarize, and polish text while preserving the user's intent.
-Keep output clean and ready to use.
-Ask no extra questions unless the missing detail would materially change the result.
+Keep output clean and ready to use, but do not make it sound generic.
+Ask a clarifying question only when the missing detail would materially change the result.
 Prioritize attached file content when files are included.
 Do not invent information that is not present.
 `.trim(),
 
   "file-analysis": `
-You are Desktop Spotlight AI, an efficient local document assistant.
+Help analyze attached files clearly and naturally.
 Use attached file content as the primary source.
 Summarize, answer questions, and extract action items with concise evidence from the file when useful.
 Say when a detail is not present in the attached content.
@@ -176,8 +176,8 @@ Do not invent information that is not present.
 `.trim(),
 
   general: `
-You are Desktop Spotlight AI, a fast local desktop assistant.
-Give clear, practical answers with the least complexity needed.
+Help with the user's request directly and naturally.
+Give clear, practical answers with enough personality and context to feel useful.
 Prioritize attached file content when files are included.
 Do not invent information that is not present.
 `.trim(),
@@ -681,6 +681,10 @@ async function summarizeFile(
   };
 }
 
+function hasDraggedFiles(event: DragEvent<HTMLElement>) {
+  return Array.from(event.dataTransfer.types).includes("Files");
+}
+
 function getModelName(model: unknown) {
   if (typeof model === "string") {
     return model;
@@ -840,30 +844,6 @@ function MoreIcon({ className }: IconProps) {
       <circle cx="3.5" cy="8" r="1.2" fill="currentColor" />
       <circle cx="8" cy="8" r="1.2" fill="currentColor" />
       <circle cx="12.5" cy="8" r="1.2" fill="currentColor" />
-    </svg>
-  );
-}
-
-function ThemeIcon({ className, theme }: IconProps & { theme: Theme }) {
-  if (theme === "dark") {
-    return (
-      <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
-        <circle cx="8" cy="8" r="3" fill="none" stroke="currentColor" strokeWidth="1.4" />
-        <path d="M8 1.75v1.6M8 12.65v1.6M1.75 8h1.6M12.65 8h1.6M3.4 3.4l1.15 1.15M11.45 11.45l1.15 1.15M3.4 12.6l1.15-1.15M11.45 4.55l1.15-1.15" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.4" />
-      </svg>
-    );
-  }
-
-  return (
-    <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
-      <path
-        d="M10.95 2.35a5.45 5.45 0 1 0 2.7 10.2A5.9 5.9 0 0 1 10.95 2.35Z"
-        fill="none"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.4"
-      />
     </svg>
   );
 }
@@ -1038,7 +1018,11 @@ ${taskSystemPrompts[taskMode]}
 
 ${runtimeProfile.systemNote}
 
-You are Desktop Spotlight AI, a local desktop assistant.
+Sound like a normal modern AI assistant: conversational, thoughtful, and specific.
+It is okay to be warm, lightly expressive, and a little fuller when the user would benefit from it.
+Avoid generic canned phrases, corporate product language, and self-descriptions.
+Do not introduce yourself or recite what kind of assistant you are.
+If directly asked what you are running on, say you are using the selected local Ollama model.
 Do not claim to be GPT-4, ChatGPT, or an OpenAI model.
 `.trim();
 
@@ -1344,11 +1328,7 @@ function App() {
       return {
         title: "Files attached.",
         description:
-          "Ask a question or generate a summary.",
-        prompts: [
-          "Summarize the attached notes and pull out the key actions.",
-          "Review the attached files and tell me what matters most.",
-        ],
+          "Ask a question or send when you are ready.",
       };
     }
 
@@ -1357,7 +1337,6 @@ function App() {
         title: "Draft in progress.",
         description:
           "Keep writing, attach a file, or send.",
-        prompts: [] as string[],
       };
     }
 
@@ -1366,10 +1345,6 @@ function App() {
         title: "Continue.",
         description:
           "Pick up where you left off or start something new.",
-        prompts: [
-          "Review my last conversation and suggest the next actions.",
-          "Draft a follow-up message based on what we already discussed.",
-        ],
       };
     }
 
@@ -1377,10 +1352,6 @@ function App() {
       title: "Ready.",
       description:
         "Drop a file or ask a question.",
-      prompts: [
-        "Summarize the attached notes and pull out the key actions.",
-        "Turn this into a clean email draft I can send.",
-      ],
     };
   }, [
     activeSessionHasTurns,
@@ -1805,11 +1776,6 @@ function App() {
 
   function openFilePicker() {
     fileInputRef.current?.click();
-  }
-
-  function applyStarterPrompt(prompt: string) {
-    setMessage(prompt);
-    messageRef.current?.focus();
   }
 
   function removeFile(fileId: string) {
@@ -2502,21 +2468,6 @@ function App() {
                 ) : null}
               </div>
 
-              <button
-                type="button"
-                className="theme-toggle"
-                onClick={() =>
-                  setTheme((current) =>
-                    current === "dark"
-                      ? "light"
-                      : "dark",
-                  )
-                }
-                aria-pressed={theme === "light"}
-              >
-                <ThemeIcon className="ui-icon" theme={theme} />
-                <span>{theme === "dark" ? "Light" : "Dark"}</span>
-              </button>
             </div>
           </div>
 
@@ -2686,21 +2637,6 @@ function App() {
               <h3>{emptyStateContent.title}</h3>
 
               <p>{emptyStateContent.description}</p>
-
-              {emptyStateContent.prompts.length ? (
-                <div className="starter-prompts" role="group" aria-label="Starter prompts">
-                  {emptyStateContent.prompts.map((prompt) => (
-                    <button
-                      key={prompt}
-                      type="button"
-                      className="starter-prompt-button"
-                      onClick={() => applyStarterPrompt(prompt)}
-                    >
-                      {prompt}
-                    </button>
-                  ))}
-                </div>
-              ) : null}
             </div>
           ) : (
             <div className="active-chat-heading">

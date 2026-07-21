@@ -181,7 +181,6 @@ h3 {
 
 .history-item-shell,
 .turn,
-.starter-prompt-button,
 .header-toolbar,
 .model-select-shell {
   transition:
@@ -198,7 +197,7 @@ h3 {
   min-width: 0;
   min-height: 0;
 
-  padding: 16px 12px;
+  padding: 16px 10px;
 
   display: flex;
   flex-direction: column;
@@ -206,8 +205,8 @@ h3 {
 
   overflow: hidden;
 
-  background: var(--sidebar-bg);
-  border-right: 1px solid var(--border);
+  background: var(--bg);
+  border-right: 0;
 
   contain: layout paint;
 }
@@ -221,7 +220,7 @@ h3 {
   margin-top: auto;
   padding-top: 10px;
 
-  border-top: 1px solid var(--border);
+  border-top: 0;
 }
 
 .sidebar-settings-button {
@@ -233,16 +232,11 @@ h3 {
   align-items: center;
   gap: 8px;
 
-  border: 1px solid var(--border);
+  border: 1px solid transparent;
   border-radius: 14px;
 
   color: var(--muted);
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--surface-soft) 88%, transparent),
-      color-mix(in srgb, var(--surface) 44%, transparent)
-    );
+  background: transparent;
 
   text-align: left;
 }
@@ -254,8 +248,8 @@ h3 {
 
 .sidebar-settings-button[aria-pressed="true"] {
   color: var(--text);
-  border-color: color-mix(in srgb, var(--accent) 22%, var(--border));
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border-color: transparent;
+  background: var(--active);
 }
 
 .sidebar.collapsed .sidebar-footer {
@@ -290,17 +284,12 @@ h3 {
   align-items: center;
   justify-content: flex-start;
   gap: 4px;
+  padding: 0;
 
-  padding: 3px;
+  border: 0;
+  border-radius: 0;
 
-  border: 1px solid var(--border);
-  border-radius: 999px;
-
-  background: color-mix(in srgb, var(--surface-soft) 84%, transparent);
-
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.03),
-    0 8px 18px rgba(0, 0, 0, 0.12);
+  background: transparent;
 }
 
 .sidebar-collapse-button {
@@ -313,16 +302,11 @@ h3 {
   display: grid;
   place-items: center;
 
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 999px;
 
   color: var(--muted);
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--surface) 76%, transparent),
-      color-mix(in srgb, var(--surface-soft) 92%, transparent)
-    );
+  background: transparent;
 
   font-size: 0.9rem;
   line-height: 1;
@@ -330,13 +314,7 @@ h3 {
 
 .sidebar-collapse-button:hover {
   color: var(--text);
-  border-color: color-mix(in srgb, var(--accent) 24%, var(--border));
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--accent) 12%, var(--surface)),
-      color-mix(in srgb, var(--surface-soft) 92%, transparent)
-    );
+  background: var(--hover);
 }
 
 .sidebar.collapsed .sidebar-header {
@@ -368,22 +346,17 @@ h3 {
   min-width: 0;
   padding: 5px 4px;
 
-  border: 1px solid var(--border);
+  border: 0;
   border-radius: 12px;
 
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--surface) 70%, transparent),
-      color-mix(in srgb, var(--surface-soft) 90%, transparent)
-    );
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  background: transparent;
+  box-shadow: none;
 
   text-align: left;
 }
 
 .sidebar-collapsed-item.active {
-  border-color: color-mix(in srgb, var(--accent) 26%, var(--border));
+  background: var(--active);
 }
 
 .sidebar-collapsed-item span {
@@ -416,7 +389,7 @@ h3 {
 
   display: flex;
   align-items: center;
-  gap: 7px;
+  gap: 0;
 
   overflow: hidden;
   text-overflow: ellipsis;
@@ -430,17 +403,7 @@ h3 {
 }
 
 .sidebar-header h2::before {
-  content: "";
-
-  width: 6px;
-  height: 6px;
-
-  flex: 0 0 auto;
-
-  border-radius: 999px;
-
-  background: var(--accent);
-  box-shadow: 0 0 10px color-mix(in srgb, var(--accent) 40%, transparent);
+  content: none;
 }
 
 .sidebar-new-button {
@@ -534,27 +497,20 @@ h3 {
   align-items: center;
   gap: 2px;
 
-  border: 1px solid transparent;
-  border-radius: 18px;
-  background: color-mix(in srgb, var(--surface) 22%, transparent);
+  border: 0;
+  border-radius: 12px;
+  background: transparent;
 }
 
 .history-item-shell:hover {
-  transform: translateY(-1px);
-  border-color: var(--border);
-  background: color-mix(in srgb, var(--surface-soft) 74%, transparent);
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.08);
+  transform: none;
+  background: var(--hover);
+  box-shadow: none;
 }
 
 .history-item-shell.active {
-  border-color: color-mix(in srgb, var(--accent) 26%, var(--border));
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--accent) 14%, transparent),
-      color-mix(in srgb, var(--surface-soft) 78%, transparent)
-    );
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.1);
+  background: var(--active);
+  box-shadow: none;
 }
 
 .history-item {
@@ -565,7 +521,7 @@ h3 {
 
   display: block;
 
-  border-radius: 18px;
+  border-radius: 12px;
 
   color: var(--text);
   background: transparent;
@@ -728,34 +684,19 @@ h3 {
 
   border-radius: 999px;
 
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--surface-soft) 88%, transparent),
-      color-mix(in srgb, var(--surface) 40%, transparent)
-    );
-
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.03),
-    0 6px 16px rgba(0, 0, 0, 0.08);
+  background: var(--surface-soft);
+  box-shadow: none;
 }
 
 .model-select-shell:hover {
   border-color: color-mix(in srgb, var(--accent) 14%, var(--border));
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--surface-soft) 92%, transparent),
-      color-mix(in srgb, var(--surface) 46%, transparent)
-    );
+  background: var(--hover);
 }
 
 .model-select-shell:focus-within {
   border-color: color-mix(in srgb, var(--accent) 24%, var(--border));
   box-shadow:
-    0 0 0 3px color-mix(in srgb, var(--accent) 24%, transparent),
-    inset 0 1px 0 rgba(255, 255, 255, 0.03),
-    0 6px 16px rgba(0, 0, 0, 0.08);
+    0 0 0 3px color-mix(in srgb, var(--accent) 24%, transparent);
 }
 
 .model-select-shell::after {
@@ -786,8 +727,7 @@ h3 {
   text-transform: uppercase;
 }
 
-.model-select-trigger,
-.theme-toggle {
+.model-select-trigger {
   height: 36px;
 
   border: 1px solid transparent;
@@ -805,10 +745,6 @@ h3 {
 .model-select-trigger:focus-visible {
   background: transparent;
   box-shadow: none;
-}
-
-.theme-toggle:hover {
-  background: var(--hover);
 }
 
 .model-select-trigger {
@@ -889,24 +825,6 @@ h3 {
   font-size: 0.72rem;
 }
 
-.theme-toggle {
-  border-color: var(--border);
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--surface-soft) 80%, transparent),
-      color-mix(in srgb, var(--surface) 34%, transparent)
-    );
-
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.03),
-    0 6px 16px rgba(0, 0, 0, 0.06);
-}
-
 .settings-card {
   flex: 1 1 auto;
 
@@ -921,12 +839,7 @@ h3 {
   border: 1px solid var(--border);
   border-radius: 22px;
 
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--surface-soft) 80%, transparent),
-      var(--surface)
-    );
+  background: var(--surface);
 }
 
 .settings-header {
@@ -1197,44 +1110,6 @@ h3 {
   font-size: 0.84rem;
 }
 
-.starter-prompts {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-}
-
-.starter-prompt-button {
-  padding: 10px 14px;
-
-  border: 1px solid var(--border);
-  border-radius: 16px;
-
-  color: var(--text);
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--surface) 86%, transparent),
-      color-mix(in srgb, var(--surface-soft) 80%, transparent)
-    );
-
-  text-align: left;
-  font-size: 0.84rem;
-  font-weight: 500;
-  line-height: 1.35;
-}
-
-.starter-prompt-button:hover {
-  transform: translateY(-1px);
-  border-color: color-mix(in srgb, var(--accent) 24%, var(--border));
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--accent) 10%, var(--surface)),
-      color-mix(in srgb, var(--surface-soft) 88%, transparent)
-    );
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.08);
-}
-
 .active-chat-heading {
   flex: 0 0 auto;
 
@@ -1281,12 +1156,7 @@ h3 {
   border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
   border-radius: 18px;
 
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--surface-soft) 60%, transparent),
-      color-mix(in srgb, var(--surface) 34%, transparent)
-    );
+  background: var(--surface-soft);
 
   overflow: hidden;
 }
@@ -1298,13 +1168,8 @@ h3 {
 
 .file-preview-panel.open {
   border-color: color-mix(in srgb, var(--accent) 16%, var(--border));
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--accent) 4%, var(--surface-soft)),
-      color-mix(in srgb, var(--surface) 56%, transparent)
-    );
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  background: var(--surface-soft);
+  box-shadow: none;
 }
 
 .file-preview-header {
@@ -1536,12 +1401,7 @@ h3 {
   overflow: hidden;
   border: 1px solid var(--border);
   border-radius: 17px;
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--surface-soft) 90%, transparent),
-      var(--surface-soft)
-    );
+  background: var(--surface-soft);
 
   /* Do not contain dynamically sized messages */
   contain: none;
@@ -1591,7 +1451,7 @@ h3 {
   border: 1px solid var(--border);
   border-radius: 18px;
 
-  box-shadow: 0 10px 24px rgba(0, 0, 0, 0.1);
+  box-shadow: none;
 
   /* Prevent message height virtualization/clipping */
   contain: none;
@@ -1659,30 +1519,19 @@ h3 {
   align-self: flex-end;
   border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
   border-bottom-right-radius: 8px;
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--accent) 22%, transparent),
-      color-mix(in srgb, var(--accent) 12%, transparent)
-    );
+  background: var(--active);
 }
 
 .turn-assistant {
   align-self: flex-start;
   border-bottom-left-radius: 8px;
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--surface) 92%, var(--surface-soft)),
-      var(--surface)
-    );
+  background: var(--surface);
 }
 
 .turn.streaming {
   border-color: var(--accent-soft);
   box-shadow:
-    0 0 0 1px color-mix(in srgb, var(--accent) 16%, transparent),
-    0 10px 24px rgba(0, 0, 0, 0.1);
+    0 0 0 1px color-mix(in srgb, var(--accent) 16%, transparent);
 }
 
 .message-attachments {
@@ -1837,12 +1686,7 @@ h3 {
   border-radius: 999px;
 
   color: var(--text);
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--surface) 74%, transparent),
-      color-mix(in srgb, var(--surface-soft) 88%, transparent)
-    );
+  background: var(--surface);
 
   font-size: 0.78rem;
   font-weight: 600;
@@ -1856,12 +1700,7 @@ h3 {
 
 .summarize-action-button:hover:not(:disabled) {
   border-color: color-mix(in srgb, var(--accent) 18%, var(--border));
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--accent) 8%, var(--surface)),
-      color-mix(in srgb, var(--surface-soft) 88%, transparent)
-    );
+  background: var(--hover);
 }
 
 .composer-shell {
@@ -1878,14 +1717,8 @@ h3 {
   border: 1px solid var(--border);
   border-radius: 999px;
 
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--surface-soft) 92%, transparent),
-      var(--surface-soft)
-    );
-
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03);
+  background: var(--surface-soft);
+  box-shadow: none;
 
   contain: layout paint;
 }
@@ -1988,12 +1821,7 @@ h3 {
 
   border-radius: 999px;
   border: 1px solid var(--border);
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--surface) 76%, transparent),
-      color-mix(in srgb, var(--surface-soft) 92%, transparent)
-    );
+  background: var(--surface);
   color: var(--muted);
 
   white-space: nowrap;
@@ -2008,12 +1836,7 @@ h3 {
 .preset-pill-button:hover:not(:disabled) {
   color: var(--text);
   border-color: color-mix(in srgb, var(--accent) 24%, var(--border));
-  background:
-    linear-gradient(
-      180deg,
-      color-mix(in srgb, var(--accent) 10%, var(--surface)),
-      color-mix(in srgb, var(--surface-soft) 92%, transparent)
-    );
+  background: var(--hover);
 }
 
 .preset-pill-button:disabled {
@@ -2132,7 +1955,6 @@ h3 {
 .sidebar-collapse-button:focus-visible,
 .sidebar-settings-button:focus-visible,
 .model-select-trigger:focus-visible,
-.theme-toggle:focus-visible,
 .attach-button:focus-visible,
 .summarize-action-button:focus-visible,
 .preset-pill-button:focus-visible,
@@ -2238,7 +2060,6 @@ h3 {
   .sidebar-new-button .ui-icon,
   .history-options-button .ui-icon,
   .attach-button .ui-icon,
-  .theme-toggle .ui-icon,
   .send-button .ui-icon {
     width: 15px;
     height: 15px;
@@ -2257,8 +2078,7 @@ h3 {
     padding: 0 10px;
   }
 
-  .model-select-trigger,
-  .theme-toggle {
+  .model-select-trigger {
     height: 34px;
     padding: 0 11px;
     font-size: 0.78rem;
@@ -2326,14 +2146,6 @@ h3 {
     display: none;
   }
 
-  .starter-prompts {
-    gap: 8px;
-  }
-
-  .starter-prompt-button {
-    width: 100%;
-  }
-
   .preset-pill-button,
   .composer-summarize-button,
   .cancel-button.composer-cancel-button,
@@ -2399,8 +2211,7 @@ h3 {
     flex: 1 1 auto;
   }
 
-  .model-select-trigger,
-  .theme-toggle {
+  .model-select-trigger {
     height: 32px;
     font-size: 0.74rem;
     padding: 0 10px;
@@ -2427,7 +2238,6 @@ h3 {
   .sidebar-new-button .ui-icon,
   .history-options-button .ui-icon,
   .attach-button .ui-icon,
-  .theme-toggle .ui-icon,
   .send-button .ui-icon {
     width: 14px;
     height: 14px;
