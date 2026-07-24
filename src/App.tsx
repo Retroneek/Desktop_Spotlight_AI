@@ -92,6 +92,7 @@ type ChatTurn = {
   role: "user" | "assistant";
   content: string;
   files?: AttachedFile[];
+  createdAt?: number;
 };
 
 type ChatSession = {
@@ -175,6 +176,20 @@ function createId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function getTimestampFromId(id: string) {
+  const match = id.match(/-(\d{10,})/);
+  return match ? Number(match[1]) : undefined;
+}
+
+function formatLocalTime(timestamp?: number) {
+  if (!timestamp) return "";
+
+  return new Date(timestamp).toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 function createSession(title = "New chat"): ChatSession {
   const now = Date.now();
 
@@ -198,19 +213,29 @@ function getInitialSessions(): ChatSession[] {
       return [createSession()];
     }
 
-    return parsed.map((session) => ({
-      ...session,
-      title: typeof session.title === "string" ? session.title : "New chat",
-      turns: Array.isArray(session.turns) ? session.turns : [],
-      createdAt:
-        typeof session.createdAt === "number"
-          ? session.createdAt
-          : Date.now(),
-      updatedAt:
-        typeof session.updatedAt === "number"
-          ? session.updatedAt
-          : Date.now(),
-    }));
+    return parsed.map((session) => {
+      const createdAt =
+        typeof session.createdAt === "number" ? session.createdAt : Date.now();
+
+      return {
+        ...session,
+        title: typeof session.title === "string" ? session.title : "New chat",
+        turns: Array.isArray(session.turns)
+          ? session.turns.map((turn) => ({
+              ...turn,
+              createdAt:
+                typeof turn.createdAt === "number"
+                  ? turn.createdAt
+                  : getTimestampFromId(turn.id) ?? createdAt,
+            }))
+          : [],
+        createdAt,
+        updatedAt:
+          typeof session.updatedAt === "number"
+            ? session.updatedAt
+            : Date.now(),
+      };
+    });
   } catch {
     return [createSession()];
   }
@@ -1469,7 +1494,45 @@ function MessageComposer({
           <span>{isGenerating ? "Working" : "Send"}</span>
         </button>
       </div>
+
+      <p className="composer-hint">
+        <kbd>Enter</kbd> to send <span>·</span> <kbd>Shift + Enter</kbd> for a new line
+      </p>
     </div>
+  );
+}
+
+function CopyIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
+      <rect x="5.3" y="4.7" width="7" height="8" rx="1.2" fill="none" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M10.5 4.7V3.8A1.5 1.5 0 0 0 9 2.3H4.2a1.5 1.5 0 0 0-1.5 1.5v5.4a1.5 1.5 0 0 0 1.5 1.5h1.1" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.3" />
+    </svg>
+  );
+}
+
+function DownloadIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M8 2.5v7.1m0 0 2.7-2.7M8 9.6 5.3 6.9M3 12.5v.7c0 .45.35.8.8.8h8.4c.45 0 .8-.35.8-.8v-.7" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.35" />
+    </svg>
+  );
+}
+
+function RegenerateIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M12.7 6.3A5.1 5.1 0 1 0 13 9.5M12.7 2.8v3.5H9.2" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.35" />
+    </svg>
+  );
+}
+
+function EditIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
+      <path d="m3.1 11.3-.7 2.3 2.3-.7 7.2-7.2a1.35 1.35 0 0 0-1.9-1.9l-7.2 7.5Z" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="1.3" />
+      <path d="m8.9 4.9 2.1 2.1" fill="none" stroke="currentColor" strokeWidth="1.3" />
+    </svg>
   );
 }
 
@@ -2061,6 +2124,36 @@ function App() {
     setEditingSessionId(null);
   }
 
+  function editPrompt(turn: ChatTurn) {
+    setMessage(turn.content);
+    setAttachedFiles(turn.files ?? []);
+    setSelectedPreviewFileId(turn.files?.[0]?.id ?? null);
+    setIsPreviewOpen(Boolean(turn.files?.length));
+
+    window.requestAnimationFrame(() => {
+      messageRef.current?.focus();
+    });
+  }
+
+  async function copyResponse(content: string) {
+    try {
+      await navigator.clipboard.writeText(content);
+    } catch {
+      // Clipboard access can be unavailable in some desktop webviews.
+    }
+  }
+
+  function downloadResponse(content: string) {
+    const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `${activeSession.title || "response"}.md`
+      .replace(/[\\/:*?\"<>|]/g, "-");
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+
   function duplicateSession(sessionId: string) {
     const session = sessions.find(
       (item) => item.id === sessionId,
@@ -2221,12 +2314,14 @@ function App() {
       role: "user",
       content: visibleContent,
       files: filesForTurn,
+      createdAt: now,
     };
 
     const nextAssistantTurn: ChatTurn = {
       id: assistantTurnId ?? `assistant-${now}`,
       role: "assistant",
       content: "Thinking...",
+      createdAt: now,
     };
 
     const automaticTitle =
@@ -2261,8 +2356,9 @@ function App() {
           turns: session.turns.map((turn) =>
             turn.id === nextAssistantTurn.id
               ? {
-                  ...turn,
-                  content: "Thinking...",
+                ...turn,
+                content: "Thinking...",
+                createdAt: now,
                 }
               : turn,
           ),
@@ -2375,6 +2471,7 @@ function App() {
         role: "user",
         content: visibleContent,
         files: filesForTurn,
+        createdAt: now,
       };
       const assistantTurn: ChatTurn = {
         id: `assistant-${now}`,
@@ -2383,6 +2480,7 @@ function App() {
           requestedModel === activeModelName
             ? `Already using ${requestedModel}.`
             : `Switched to ${requestedModel}.`,
+        createdAt: now,
       };
 
       setSelectedModelName(requestedModel);
@@ -2573,6 +2671,12 @@ function App() {
         }`}
       >
         <div className="sidebar-header">
+          <div className="product-brand" aria-label="Spotlight Local AI">
+            <span className="product-mark" aria-hidden="true">✦</span>
+            <span className="product-name">Spotlight</span>
+            <small>Local AI</small>
+          </div>
+
           <div className="sidebar-header-bar">
             <button
               type="button"
@@ -2658,7 +2762,7 @@ function App() {
                       );
                     }}
                   >
-                    {editingSessionId === session.id ? (
+                    {editingSessionId === session.id && session.id !== activeSession.id ? (
                       <input
                         className="history-rename-input"
                         value={draftTitle}
@@ -2793,7 +2897,9 @@ function App() {
           <div className="header-actions">
             <div className="header-toolbar">
               <div className="model-select-shell">
-                <span className="toolbar-label">Model</span>
+                <span className="model-local-status" aria-label="Local model">
+                  <i aria-hidden="true" />
+                </span>
 
                 <button
                   type="button"
@@ -3013,13 +3119,51 @@ function App() {
         <section className="card chat-canvas">
           {activeSession.turns.length === 0 ? (
             <div className="canvas-greeting">
+              <span className="greeting-mark" aria-hidden="true">✦</span>
               <h3>{emptyStateContent.title}</h3>
 
               <p>{emptyStateContent.description}</p>
+
+              {!hasDraftMessage && !attachedFiles.length ? (
+                <div className="canvas-starter-actions" aria-label="Starter prompts">
+                  <button type="button" onClick={() => editPrompt({ id: "starter", role: "user", content: "Help me plan my next task." })}>
+                    Plan a task
+                  </button>
+                  <button type="button" onClick={() => editPrompt({ id: "starter", role: "user", content: "Summarize the file I attached." })}>
+                    Summarize a file
+                  </button>
+                </div>
+              ) : null}
             </div>
           ) : (
             <div className="active-chat-heading">
-              <span>Conversation</span>
+              {editingSessionId === activeSession.id ? (
+                <input
+                  className="active-chat-title-input"
+                  value={draftTitle}
+                  autoFocus
+                  onChange={(event) => setDraftTitle(event.currentTarget.value)}
+                  onBlur={commitRename}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") event.currentTarget.blur();
+                    if (event.key === "Escape") setEditingSessionId(null);
+                  }}
+                  aria-label="Chat title"
+                />
+              ) : (
+                <>
+                  <strong>{activeSession.title}</strong>
+                  <button
+                    type="button"
+                    className="active-chat-title-edit"
+                    onClick={() => startRename(activeSession.id)}
+                    aria-label="Edit chat title"
+                    title="Edit chat title"
+                  >
+                    <EditIcon className="ui-icon" />
+                  </button>
+                </>
+              )}
 
               {isGenerating ? (
                 <small>Generating</small>
@@ -3166,12 +3310,13 @@ function App() {
                   return (
                     <div
                       key={turn.id}
-                      className={`turn turn-${turn.role}${
-                        isStreamingTurn
-                          ? " streaming"
-                          : ""
-                      }`}
+                      className={`turn-row turn-row-${turn.role}`}
                     >
+                      <div
+                        className={`turn turn-${turn.role}${
+                          isStreamingTurn ? " streaming" : ""
+                        }`}
+                      >
                       {turn.files?.length ? (
                         <div className="message-attachments">
                           {turn.files.map((file) => (
@@ -3202,20 +3347,69 @@ function App() {
                         </div>
                       )}
 
-                      {canRegenerateTurn ? (
-                        <div className="turn-actions">
+                      {turn.role === "assistant" ? (
+                        <div className="turn-actions turn-actions-assistant">
                           <button
                             type="button"
                             className="turn-action-button"
-                            disabled={isGenerating || !activeModelName}
-                            onClick={() => {
-                              void regenerateLastResponse();
-                            }}
+                            title="Copy response"
+                            onClick={() => void copyResponse(turn.content)}
                           >
-                            Regenerate
+                            <CopyIcon className="turn-action-icon" />
+                            <span>Copy</span>
+                          </button>
+
+                          <button
+                            type="button"
+                            className="turn-action-button"
+                            title="Download response as Markdown"
+                            onClick={() => downloadResponse(turn.content)}
+                          >
+                            <DownloadIcon className="turn-action-icon" />
+                            <span>Save</span>
+                          </button>
+
+                          {canRegenerateTurn ? (
+                            <button
+                              type="button"
+                              className="turn-action-button"
+                              title="Regenerate response"
+                              disabled={isGenerating || !activeModelName}
+                              onClick={() => {
+                                void regenerateLastResponse();
+                              }}
+                            >
+                              <RegenerateIcon className="turn-action-icon" />
+                              <span>Retry</span>
+                            </button>
+                          ) : null}
+                        </div>
+                      ) : (
+                        <div className="turn-actions turn-actions-user">
+                          <button
+                            type="button"
+                            className="turn-action-button"
+                            title="Edit prompt"
+                            disabled={isGenerating}
+                            onClick={() => editPrompt(turn)}
+                          >
+                            <EditIcon className="turn-action-icon" />
+                            <span>Edit</span>
                           </button>
                         </div>
-                      ) : null}
+                      )}
+                      </div>
+
+                      <time
+                        className="turn-timestamp"
+                        dateTime={
+                          turn.createdAt
+                            ? new Date(turn.createdAt).toISOString()
+                            : undefined
+                        }
+                      >
+                        {formatLocalTime(turn.createdAt)}
+                      </time>
                     </div>
                   );
                 })
