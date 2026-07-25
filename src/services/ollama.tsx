@@ -151,73 +151,97 @@ export function useOllama(baseUrl = DEFAULT_OLLAMA_BASE_URL) {
         const controller = new AbortController();
         abortControllerRef.current = controller;
 
-        const response = await fetch(`${baseUrl}/api/chat`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            model: selectedModel,
-            messages,
-            stream: true,
-            options,
-          }),
-          signal: controller.signal,
-        });
+        async function runChatRequest(optionsForRequest?: OllamaChatOptions) {
+          const response = await fetch(`${baseUrl}/api/chat`, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              model: selectedModel,
+              messages,
+              stream: true,
+              ...(optionsForRequest ? { options: optionsForRequest } : {}),
+            }),
+            signal: controller.signal,
+          });
 
-        if (!response.ok) {
-          const detail = await readOllamaError(response);
-          throw new Error(`Ollama API error ${response.status}: ${detail}`);
-        }
-
-        if (!response.body) {
-          throw new Error("Ollama returned no response stream.");
-        }
-
-        const reader = response.body.getReader();
-        const decoder = new TextDecoder();
-
-        let buffer = "";
-        let fullText = "";
-
-        function handleLine(line: string) {
-          const trimmed = line.trim();
-          if (!trimmed) return;
-
-          const parsed = JSON.parse(trimmed) as ChatStreamChunk;
-
-          if (parsed.error) {
-            throw new Error(parsed.error);
+          if (!response.ok) {
+            const detail = await readOllamaError(response);
+            throw new Error(`Ollama API error ${response.status}: ${detail}`);
           }
 
-          const chunk = parsed.message?.content ?? parsed.response ?? "";
-
-          if (chunk) {
-            fullText += chunk;
-            onChunk(chunk);
+          if (!response.body) {
+            throw new Error("Ollama returned no response stream.");
           }
-        }
 
-        while (true) {
-          const { value, done } = await reader.read();
+          const reader = response.body.getReader();
+          const decoder = new TextDecoder();
 
-          if (done) break;
+          let buffer = "";
+          let fullText = "";
 
-          buffer += decoder.decode(value, { stream: true });
+          function handleLine(line: string) {
+            const trimmed = line.trim();
+            if (!trimmed) return;
 
-          const lines = buffer.split("\n");
-          buffer = lines.pop() ?? "";
+            const parsed = JSON.parse(trimmed) as ChatStreamChunk;
 
-          for (const line of lines) {
-            handleLine(line);
+            if (parsed.error) {
+              throw new Error(parsed.error);
+            }
+
+            const chunk = parsed.message?.content ?? parsed.response ?? "";
+
+            if (chunk) {
+              fullText += chunk;
+              onChunk(chunk);
+            }
           }
+
+          while (true) {
+            const { value, done } = await reader.read();
+
+            if (done) break;
+
+            buffer += decoder.decode(value, { stream: true });
+
+            const lines = buffer.split("\n");
+            buffer = lines.pop() ?? "";
+
+            for (const line of lines) {
+              handleLine(line);
+            }
+          }
+
+          if (buffer.trim()) {
+            handleLine(buffer);
+          }
+
+          return fullText;
         }
 
-        if (buffer.trim()) {
-          handleLine(buffer);
+        const firstText = await runChatRequest(options);
+
+        if (firstText.trim() || !options) {
+          if (!firstText.trim()) {
+            throw new Error(
+              "Ollama returned an empty response. The selected model may not support this chat request, or Ollama may need a restart.",
+            );
+          }
+
+          return firstText;
         }
 
-        return fullText;
+        const retryText = await runChatRequest();
+
+        if (!retryText.trim()) {
+          throw new Error(
+            "Ollama returned an empty response. The selected model may not support this chat request, or Ollama may need a restart.",
+          );
+        }
+
+        return retryText;
       } catch (err) {
         if (
           err instanceof Error &&

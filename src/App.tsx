@@ -9,6 +9,17 @@ import {
   useRef,
   useState,
 } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import {
+  buildPrompt,
+  buildCompactPrompt,
+  createFolderAttachmentFromScan,
+  type ContextAttachment,
+  type ProjectFolderScan,
+  type SkippedFolderFile,
+  summarizeBrowserFolder,
+  truncateContext,
+} from "./services/contextBuilder";
 import { type OllamaChatOptions, useOllama } from "./services/ollama";
 import "./App.css";
 
@@ -78,20 +89,14 @@ type TaskMode =
 type HardwareProfileId = (typeof hardwareProfiles)[number]["id"];
 type Theme = "dark" | "light";
 
-type AttachedFile = {
-  id: string;
-  name: string;
-  typeLabel: string;
-  sizeLabel: string;
-  preview: string;
-  supported: boolean;
-};
+type AttachedFile = ContextAttachment;
 
 type ChatTurn = {
   id: string;
   role: "user" | "assistant";
   content: string;
   files?: AttachedFile[];
+  createdAt?: number;
 };
 
 type ChatSession = {
@@ -140,6 +145,10 @@ const maxMessageLines = 10;
 const lineHeight = 18;
 const verticalPadding = 10;
 const maxMessageHeight = lineHeight * maxMessageLines + verticalPadding;
+const folderInputAttributes = {
+  webkitdirectory: "",
+  directory: "",
+} as const;
 
 const taskSystemPrompts: Record<TaskMode, string> = {
   coding: `
@@ -175,6 +184,20 @@ function createId(prefix: string) {
   return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 }
 
+function getTimestampFromId(id: string) {
+  const match = id.match(/-(\d{10,})/);
+  return match ? Number(match[1]) : undefined;
+}
+
+function formatLocalTime(timestamp?: number) {
+  if (!timestamp) return "";
+
+  return new Date(timestamp).toLocaleTimeString([], {
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 function createSession(title = "New chat"): ChatSession {
   const now = Date.now();
 
@@ -198,19 +221,29 @@ function getInitialSessions(): ChatSession[] {
       return [createSession()];
     }
 
-    return parsed.map((session) => ({
-      ...session,
-      title: typeof session.title === "string" ? session.title : "New chat",
-      turns: Array.isArray(session.turns) ? session.turns : [],
-      createdAt:
-        typeof session.createdAt === "number"
-          ? session.createdAt
-          : Date.now(),
-      updatedAt:
-        typeof session.updatedAt === "number"
-          ? session.updatedAt
-          : Date.now(),
-    }));
+    return parsed.map((session) => {
+      const createdAt =
+        typeof session.createdAt === "number" ? session.createdAt : Date.now();
+
+      return {
+        ...session,
+        title: typeof session.title === "string" ? session.title : "New chat",
+        turns: Array.isArray(session.turns)
+          ? session.turns.map((turn) => ({
+              ...turn,
+              createdAt:
+                typeof turn.createdAt === "number"
+                  ? turn.createdAt
+                  : getTimestampFromId(turn.id) ?? createdAt,
+            }))
+          : [],
+        createdAt,
+        updatedAt:
+          typeof session.updatedAt === "number"
+            ? session.updatedAt
+            : Date.now(),
+      };
+    });
   } catch {
     return [createSession()];
   }
@@ -224,16 +257,40 @@ function getInitialAttachedFiles(): AttachedFile[] {
     const parsed = JSON.parse(stored) as AttachedFile[];
     if (!Array.isArray(parsed)) return [];
 
-    return parsed.map((file) => ({
-      id: typeof file.id === "string" ? file.id : createId("file"),
-      name: typeof file.name === "string" ? file.name : "Untitled file",
-      typeLabel:
-        typeof file.typeLabel === "string" ? file.typeLabel : "file",
-      sizeLabel:
-        typeof file.sizeLabel === "string" ? file.sizeLabel : "0 B",
-      preview: typeof file.preview === "string" ? file.preview : "",
-      supported: Boolean(file.supported),
-    }));
+    return parsed.map((file) => {
+      const kind = file.kind === "folder" ? "folder" : "file";
+      const preview = typeof file.preview === "string" ? file.preview : "";
+
+      return {
+        id: typeof file.id === "string" ? file.id : createId("file"),
+        kind,
+        name: typeof file.name === "string" ? file.name : "Untitled file",
+        typeLabel:
+          typeof file.typeLabel === "string" ? file.typeLabel : "file",
+        sizeLabel:
+          typeof file.sizeLabel === "string" ? file.sizeLabel : "0 B",
+        preview:
+          kind === "folder"
+            ? truncateContext(preview, 10_000)
+            : preview,
+        supported: Boolean(file.supported),
+        folderStats:
+          file.folderStats &&
+          typeof file.folderStats === "object" &&
+          typeof file.folderStats.rootName === "string"
+            ? file.folderStats
+            : undefined,
+        skippedFiles: Array.isArray(file.skippedFiles)
+          ? file.skippedFiles.filter(
+              (item): item is SkippedFolderFile =>
+                item &&
+                typeof item === "object" &&
+                typeof item.path === "string" &&
+                typeof item.reason === "string",
+            )
+          : undefined,
+      };
+    });
   } catch {
     return [];
   }
@@ -661,12 +718,17 @@ async function summarizeFile(
 
   return {
     id: `${file.name}-${file.lastModified}-${file.size}`,
+    kind: "file",
     name: file.name,
     typeLabel,
     sizeLabel: formatFileSize(file.size),
     preview,
     supported,
   };
+}
+
+function isTauriRuntime() {
+  return "__TAURI_INTERNALS__" in window;
 }
 
 function hasDraggedFiles(event: DragEvent<HTMLElement>) {
@@ -882,37 +944,14 @@ function SendIcon({ className }: IconProps) {
   );
 }
 
-function buildPrompt(content: string, files: AttachedFile[]) {
-  if (!files.length) {
-    return content;
-  }
-
-  const fileContext = files
-    .map((file) => {
-      const fileText = file.supported
-        ? file.preview
-        : "The contents of this file type could not be read.";
-
-      return [
-        `File: ${file.name}`,
-        `Type: ${file.typeLabel}`,
-        `Size: ${file.sizeLabel}`,
-        "Contents:",
-        fileText,
-      ].join("\n");
-    })
-    .join("\n\n---\n\n");
-
-  return `User request:
-${content}
-
-Attached file context:
-
-${fileContext}`;
-}
-
 function isSummaryRequest(content: string) {
   return /\b(summarize|summarise|summary|sum up|tldr|tl;dr|quick recap|overview|what is this about|what's this about)\b/i.test(
+    content,
+  );
+}
+
+function isCodeTaskRequest(content: string) {
+  return /\b(code|coding|bug|debug|typescript|javascript|react|tauri|rust|python|function|component|api|error|stack trace|compile|build|test|refactor|implement|fix|change|update|edit)\b/i.test(
     content,
   );
 }
@@ -920,15 +959,22 @@ function isSummaryRequest(content: string) {
 function detectTaskMode(content: string, files: AttachedFile[]): TaskMode {
   const text = content.toLowerCase();
   const fileNames = files.map((file) => file.name.toLowerCase()).join(" ");
+  const hasFolderContext = files.some((file) => file.kind === "folder");
+  const asksForCodeWork = isCodeTaskRequest(content);
 
   if (files.length && isSummaryRequest(content)) {
     return "file-analysis";
   }
 
   if (
-    /\b(code|coding|bug|debug|typescript|javascript|react|tauri|rust|python|function|component|api|error|stack trace|compile|build|test|refactor)\b/.test(
-      text,
-    ) ||
+    hasFolderContext &&
+    !asksForCodeWork
+  ) {
+    return "file-analysis";
+  }
+
+  if (
+    asksForCodeWork ||
     /\.(js|jsx|ts|tsx|rs|py|json|css|html|md|toml|yml|yaml)\b/.test(
       fileNames,
     )
@@ -959,43 +1005,6 @@ function detectTaskMode(content: string, files: AttachedFile[]): TaskMode {
   return "general";
 }
 
-function normalizeModelName(value: string) {
-  return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
-}
-
-function findRequestedModel(content: string, modelNames: string[]) {
-  const text = content.toLowerCase().trim();
-  const normalizedText = normalizeModelName(text);
-  const startsLikeModelCommand = /^(use|switch|change|set)\b/.test(text);
-
-  const exactModel = modelNames.find((modelName) => {
-    const normalizedModel = normalizeModelName(modelName);
-    const family = normalizeModelName(modelName.split(":")[0] ?? modelName);
-
-    return normalizedText === normalizedModel || normalizedText === family;
-  });
-
-  if (exactModel) {
-    return exactModel;
-  }
-
-  if (!startsLikeModelCommand) {
-    return undefined;
-  }
-
-  return modelNames.find((modelName) => {
-    const normalizedModel = normalizeModelName(modelName);
-    const family = normalizeModelName(modelName.split(":")[0] ?? modelName);
-
-    return (
-      normalizedText.includes(normalizedModel) ||
-      normalizedText.includes(family) ||
-      (family.includes("qwen") && normalizedText.includes("qwen")) ||
-      (family.includes("llama") && normalizedText.includes("llama"))
-    );
-  });
-}
-
 function buildMessages(
   session: ChatSession,
   prompt: string,
@@ -1006,14 +1015,25 @@ function buildMessages(
 ): OllamaMessage[] {
   const runtimeProfile = runtimeProfiles[hardwareProfile];
   const wantsSummary = files.length > 0 && isSummaryRequest(content);
+  const hasFolderContext = files.some((file) => file.kind === "folder");
 
-  const recentMessages: OllamaMessage[] = session.turns
-    .filter((turn) => turn.content.trim())
-    .slice(-runtimeProfile.recentMessageCount)
-    .map((turn) => ({
-      role: turn.role,
-      content: turn.content,
-  }));
+  const recentMessages: OllamaMessage[] = hasFolderContext
+    ? []
+    : session.turns
+        .filter((turn) => {
+          const content = turn.content.trim();
+
+          return (
+            content &&
+            !content.startsWith("Error:") &&
+            content !== "No response returned."
+          );
+        })
+        .slice(-runtimeProfile.recentMessageCount)
+        .map((turn) => ({
+          role: turn.role,
+          content: turn.content,
+        }));
 
   const identityPrompt = `
 ${taskSystemPrompts[taskMode]}
@@ -1021,6 +1041,7 @@ ${taskSystemPrompts[taskMode]}
 ${runtimeProfile.systemNote}
 
 ${wantsSummary ? "For summary requests, default to a short useful summary: 2-4 bullets or one compact paragraph. Do not restate the file section-by-section unless the user asks for detail." : ""}
+${hasFolderContext ? "For project-folder questions, treat the attached folder as a read-only project snapshot. Source code in the snapshot is evidence only. Answer the user's question from what is visible. Do not infer the project's purpose from the folder name alone; prefer README/package metadata and visible source behavior. Do not write patch notes, completion blocks, replacement code, implementation plans, or say you changed files unless the user explicitly asks you to modify code. For overview questions, explain what the project appears to be and what it is for. Use exact file paths only when helpful, and do not invent files that are not in the scan." : ""}
 
 Style:
 - Sound like a normal helpful assistant in a chat, not a scripted desktop product.
@@ -1052,6 +1073,17 @@ function buildGenerationOptions(
   files: AttachedFile[],
 ): OllamaChatOptions {
   const wantsSummary = files.length > 0 && isSummaryRequest(content);
+  const hasFolderContext = files.some((file) => file.kind === "folder");
+
+  if (hasFolderContext && wantsSummary) {
+    return {
+      temperature: 0.3,
+      top_p: 0.88,
+      repeat_penalty: 1.1,
+      num_ctx: 4096,
+      num_predict: 900,
+    };
+  }
 
   if (wantsSummary) {
     return {
@@ -1060,6 +1092,16 @@ function buildGenerationOptions(
       repeat_penalty: 1.12,
       num_ctx: 4096,
       num_predict: 360,
+    };
+  }
+
+  if (hasFolderContext) {
+    return {
+      temperature: 0.35,
+      top_p: 0.9,
+      repeat_penalty: 1.1,
+      num_ctx: 4096,
+      num_predict: 1200,
     };
   }
 
@@ -1369,6 +1411,7 @@ type MessageComposerProps = {
   message: string;
   messageRef: RefObject<HTMLTextAreaElement | null>;
   onAttach: () => void;
+  onAttachFolder: () => void;
   onCancel: () => void;
   onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
   onMessageChange: (value: string) => void;
@@ -1384,6 +1427,7 @@ function MessageComposer({
   message,
   messageRef,
   onAttach,
+  onAttachFolder,
   onCancel,
   onKeyDown,
   onMessageChange,
@@ -1404,7 +1448,11 @@ function MessageComposer({
             >
               <div className="pending-file-details">
                 <strong>{file.name}</strong>
-                <span>{file.sizeLabel}</span>
+                <span>
+                  {file.folderStats
+                    ? `${file.folderStats.filesIncluded} included · stays attached`
+                    : file.sizeLabel}
+                </span>
               </div>
 
               <button
@@ -1433,6 +1481,16 @@ function MessageComposer({
           onClick={onAttach}
         >
           <AttachIcon className="ui-icon" />
+        </button>
+
+        <button
+          type="button"
+          className="attach-folder-button"
+          aria-label="Attach folder"
+          disabled={isGenerating}
+          onClick={onAttachFolder}
+        >
+          Folder
         </button>
 
         <textarea
@@ -1469,12 +1527,93 @@ function MessageComposer({
           <span>{isGenerating ? "Working" : "Send"}</span>
         </button>
       </div>
+
+      <p className="composer-hint">
+        <kbd>Enter</kbd> to send <span>·</span>{" "}
+        <kbd>Shift + Enter</kbd> for a new line
+      </p>
     </div>
+  );
+}
+
+function CopyIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
+      <rect
+        x="5.3"
+        y="4.7"
+        width="7"
+        height="8"
+        rx="1.2"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.3"
+      />
+      <path
+        d="M10.5 4.7V3.8A1.5 1.5 0 0 0 9 2.3H4.2a1.5 1.5 0 0 0-1.5 1.5v5.4a1.5 1.5 0 0 0 1.5 1.5h1.1"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="1.3"
+      />
+    </svg>
+  );
+}
+
+function DownloadIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
+      <path
+        d="M8 2.5v7.1m0 0 2.7-2.7M8 9.6 5.3 6.9M3 12.5v.7c0 .45.35.8.8.8h8.4c.45 0 .8-.35.8-.8v-.7"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.35"
+      />
+    </svg>
+  );
+}
+
+function RegenerateIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
+      <path
+        d="M12.7 6.3A5.1 5.1 0 1 0 13 9.5M12.7 2.8v3.5H9.2"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.35"
+      />
+    </svg>
+  );
+}
+
+function EditIcon({ className }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
+      <path
+        d="m3.1 11.3-.7 2.3 2.3-.7 7.2-7.2a1.35 1.35 0 0 0-1.9-1.9l-7.2 7.5Z"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.3"
+      />
+      <path
+        d="m8.9 4.9 2.1 2.1"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.3"
+      />
+    </svg>
   );
 }
 
 function App() {
   const initialStateRef = useRef(getInitialAppState());
+  const initialAttachedFilesRef = useRef(getInitialAttachedFiles());
   const initialOllamaEndpoint = useRef(getInitialOllamaEndpoint());
   const [ollamaEndpoint, setOllamaEndpoint] = useState(
     initialOllamaEndpoint.current,
@@ -1514,8 +1653,13 @@ function App() {
     initialStateRef.current.activeSessionId,
   );
 
-  const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>(
-    getInitialAttachedFiles,
+  const [projectContext, setProjectContext] = useState<AttachedFile | null>(
+    () =>
+      initialAttachedFilesRef.current.find((file) => file.kind === "folder") ??
+      null,
+  );
+  const [attachedFiles, setAttachedFiles] = useState<AttachedFile[]>(() =>
+    initialAttachedFilesRef.current.filter((file) => file.kind !== "folder"),
   );
 
   const [message, setMessage] = useState("");
@@ -1541,6 +1685,7 @@ function App() {
 
   const messageRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
   const responseLogRef = useRef<HTMLDivElement>(null);
   const streamingTextElementRef = useRef<HTMLParagraphElement>(null);
 
@@ -1612,27 +1757,37 @@ function App() {
     );
   }, [activeSessionId, sessions])!;
 
+  const hasDraftMessage =
+    message.trim().length > 0;
+  const hasTemporaryAttachment = attachedFiles.some(
+    (file) => file.kind === "file",
+  );
   const hasPrompt =
-    message.trim().length > 0 || attachedFiles.length > 0;
+    hasDraftMessage || hasTemporaryAttachment;
+
+  const contextAttachments = useMemo(
+    () => (projectContext ? [projectContext, ...attachedFiles] : attachedFiles),
+    [attachedFiles, projectContext],
+  );
 
   const selectedPreviewFile = useMemo(() => {
-    if (!attachedFiles.length) {
+    if (!contextAttachments.length) {
       return null;
     }
 
     return (
-      attachedFiles.find(
+      contextAttachments.find(
         (file) => file.id === selectedPreviewFileId,
-      ) ?? attachedFiles[0]
+      ) ?? contextAttachments[0]
     );
-  }, [attachedFiles, selectedPreviewFileId]);
+  }, [contextAttachments, selectedPreviewFileId]);
 
-  const pendingVisibleContent = attachedFiles.length
-    ? message.trim() || `Attached ${attachedFiles.length} file(s).`
+  const pendingVisibleContent = contextAttachments.length
+    ? message.trim() || `Attached ${contextAttachments.length} file(s).`
     : "";
 
   const pendingPromptPreview = selectedPreviewFile
-    ? buildPrompt(pendingVisibleContent, attachedFiles)
+    ? buildPrompt(pendingVisibleContent, contextAttachments)
     : "";
 
   const activePreviewText = selectedPreviewFile
@@ -1664,10 +1819,15 @@ function App() {
     return null;
   }, [activeSession.turns]);
 
-  const hasDraftMessage =
-    message.trim().length > 0;
-
   const emptyStateContent = useMemo(() => {
+    if (projectContext) {
+      return {
+        title: "Project attached.",
+        description:
+          "Ask a question about the folder.",
+      };
+    }
+
     if (attachedFiles.length > 0) {
       return {
         title: "Files attached.",
@@ -1702,6 +1862,7 @@ function App() {
     attachedFiles.length,
     hasDraftMessage,
     hasSavedChats,
+    projectContext,
   ]);
 
   const canSend =
@@ -1723,17 +1884,17 @@ function App() {
     const saveTimer = window.setTimeout(() => {
       localStorage.setItem(
         attachmentStorageKey,
-        JSON.stringify(attachedFiles),
+        JSON.stringify(contextAttachments),
       );
     }, 250);
 
     return () => {
       window.clearTimeout(saveTimer);
     };
-  }, [attachedFiles]);
+  }, [contextAttachments]);
 
   useEffect(() => {
-    if (!attachedFiles.length) {
+    if (!contextAttachments.length) {
       if (selectedPreviewFileId !== null) {
         setSelectedPreviewFileId(null);
       }
@@ -1747,13 +1908,13 @@ function App() {
 
     if (
       !selectedPreviewFileId ||
-      !attachedFiles.some(
+      !contextAttachments.some(
         (file) => file.id === selectedPreviewFileId,
       )
     ) {
-      setSelectedPreviewFileId(attachedFiles[0].id);
+      setSelectedPreviewFileId(contextAttachments[0].id);
     }
-  }, [attachedFiles, isPreviewOpen, selectedPreviewFileId]);
+  }, [contextAttachments, isPreviewOpen, selectedPreviewFileId]);
 
   useEffect(() => {
     localStorage.setItem(activeChatStorageKey, activeSessionId);
@@ -2003,6 +2164,20 @@ function App() {
     });
   }
 
+  function attachFolder(folderAttachment: AttachedFile) {
+    setProjectContext(folderAttachment);
+    setSelectedPreviewFileId(folderAttachment.id);
+    setIsPreviewOpen(true);
+    setPreviewMode("extracted");
+  }
+
+  async function addBrowserFolder(files: FileList | File[]) {
+    const fileArray = Array.from(files);
+    if (!fileArray.length) return;
+
+    attachFolder(await summarizeBrowserFolder(fileArray));
+  }
+
   function createNewChat() {
     const nextSession = createSession();
 
@@ -2012,6 +2187,7 @@ function App() {
     ]);
 
     setActiveSessionId(nextSession.id);
+    setProjectContext(null);
     setAttachedFiles([]);
     setMessage("");
     setHistoryMenu(null);
@@ -2020,6 +2196,7 @@ function App() {
 
   function selectSession(sessionId: string) {
     setActiveSessionId(sessionId);
+    setProjectContext(null);
     setAttachedFiles([]);
     setMessage("");
     setHistoryMenu(null);
@@ -2091,6 +2268,7 @@ function App() {
     ]);
 
     setActiveSessionId(duplicate.id);
+    setProjectContext(null);
     setAttachedFiles([]);
     setMessage("");
     setHistoryMenu(null);
@@ -2117,6 +2295,7 @@ function App() {
         : nextSessions[0].id;
     });
 
+    setProjectContext(null);
     setAttachedFiles([]);
     setMessage("");
     setHistoryMenu(null);
@@ -2145,14 +2324,92 @@ function App() {
     });
   }
 
+  function editPrompt(turn: ChatTurn) {
+    const files = turn.files ?? [];
+    const folder = files.find((file) => file.kind === "folder") ?? null;
+    const draftFiles = files.filter((file) => file.kind !== "folder");
+
+    setMessage(turn.content);
+    setProjectContext(folder);
+    setAttachedFiles(draftFiles);
+    setSelectedPreviewFileId(files[0]?.id ?? null);
+    setIsPreviewOpen(Boolean(files.length));
+    setPreviewMode("extracted");
+
+    window.requestAnimationFrame(() => {
+      messageRef.current?.focus();
+    });
+  }
+
+  async function copyResponse(content: string) {
+    try {
+      await navigator.clipboard.writeText(content);
+    } catch {
+      // Clipboard access can be unavailable in some desktop webviews.
+    }
+  }
+
+  function downloadResponse(content: string) {
+    const blob = new Blob([content], { type: "text/markdown;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+
+    anchor.href = url;
+    anchor.download = `${activeSession.title || "response"}.md`.replace(
+      /[\\/:*?"<>|]/g,
+      "-",
+    );
+    anchor.click();
+    URL.revokeObjectURL(url);
+  }
+
   function openFilePicker() {
     fileInputRef.current?.click();
   }
 
+  function openFolderPicker() {
+    if (!isTauriRuntime()) {
+      folderInputRef.current?.click();
+      return;
+    }
+
+    void invoke<ProjectFolderScan | null>("select_project_folder")
+      .then((scan) => {
+        if (scan) {
+          attachFolder(createFolderAttachmentFromScan(scan));
+        }
+      })
+      .catch(() => {
+        folderInputRef.current?.click();
+      });
+  }
+
+  function clearAttachmentInputs() {
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+
+    if (folderInputRef.current) {
+      folderInputRef.current.value = "";
+    }
+  }
+
   function removeFile(fileId: string) {
+    if (projectContext?.id === fileId) {
+      setProjectContext(null);
+      return;
+    }
+
     setAttachedFiles((current) =>
       current.filter((file) => file.id !== fileId),
     );
+  }
+
+  function clearComposerAttachmentsAfterSend() {
+    setAttachedFiles([]);
+    setIsPreviewOpen(false);
+    setSelectedPreviewFileId(projectContext?.id ?? null);
+    clearAttachmentInputs();
   }
 
   function applyEndpointSettings() {
@@ -2221,12 +2478,14 @@ function App() {
       role: "user",
       content: visibleContent,
       files: filesForTurn,
+      createdAt: now,
     };
 
     const nextAssistantTurn: ChatTurn = {
       id: assistantTurnId ?? `assistant-${now}`,
       role: "assistant",
       content: "Thinking...",
+      createdAt: now,
     };
 
     const automaticTitle =
@@ -2263,6 +2522,7 @@ function App() {
               ? {
                   ...turn,
                   content: "Thinking...",
+                  createdAt: turn.createdAt ?? now,
                 }
               : turn,
           ),
@@ -2280,15 +2540,64 @@ function App() {
     let completedText = "";
 
     try {
-      const returnedText = await streamChat(
-        messages,
-        activeModelName,
-        (token: string) => {
-          streamedTextRef.current += token;
-          queueStreamPaint();
-        },
-        generationOptions,
-      );
+      const handleToken = (token: string) => {
+        streamedTextRef.current += token;
+        queueStreamPaint();
+      };
+      let returnedText = "";
+
+      try {
+        returnedText = await streamChat(
+          messages,
+          activeModelName,
+          handleToken,
+          generationOptions,
+        );
+      } catch (primaryError) {
+        const errorMessage =
+          primaryError instanceof Error ? primaryError.message : "";
+        const hasFolderContext = filesForTurn.some(
+          (file) => file.kind === "folder",
+        );
+        const shouldRetry =
+          errorMessage.toLowerCase().includes("empty response");
+
+        if (!shouldRetry) {
+          throw primaryError;
+        }
+
+        streamedTextRef.current = "";
+        queueStreamPaint();
+
+        const compactPrompt = hasFolderContext
+          ? buildCompactPrompt(visibleContent, filesForTurn)
+          : visibleContent;
+        const compactMessages = hasFolderContext
+          ? buildMessages(
+              {
+                ...activeSession,
+                id: sessionId,
+                turns: [],
+              },
+              compactPrompt,
+              taskMode,
+              hardwareProfile,
+              visibleContent,
+              filesForTurn,
+            )
+          : [
+              {
+                role: "user" as const,
+                content: compactPrompt,
+              },
+            ];
+
+        returnedText = await streamChat(
+          compactMessages,
+          activeModelName,
+          handleToken,
+        );
+      }
 
       completedText =
         (typeof returnedText === "string"
@@ -2330,11 +2639,7 @@ function App() {
 
       if (shouldClearComposer) {
         setMessage("");
-        setAttachedFiles([]);
-
-        if (fileInputRef.current) {
-          fileInputRef.current.value = "";
-        }
+        clearComposerAttachmentsAfterSend();
       }
 
       streamedTextRef.current = "";
@@ -2346,7 +2651,11 @@ function App() {
   async function sendMessage() {
     const trimmedMessage = message.trim();
 
-    if (!trimmedMessage && attachedFiles.length === 0) {
+    const hasSendableAttachment = attachedFiles.some(
+      (file) => file.kind === "file",
+    );
+
+    if (!trimmedMessage && !hasSendableAttachment) {
       return;
     }
 
@@ -2359,74 +2668,13 @@ function App() {
       return;
     }
 
-    const filesForTurn = attachedFiles;
+    const filesForTurn = contextAttachments;
 
     const visibleContent =
       trimmedMessage ||
       `Attached ${filesForTurn.length} file(s).`;
-    const requestedModel = trimmedMessage
-      ? findRequestedModel(trimmedMessage, availableModelNames)
-      : undefined;
 
-    if (requestedModel) {
-      const now = Date.now();
-      const userTurn: ChatTurn = {
-        id: `user-${now}`,
-        role: "user",
-        content: visibleContent,
-        files: filesForTurn,
-      };
-      const assistantTurn: ChatTurn = {
-        id: `assistant-${now}`,
-        role: "assistant",
-        content:
-          requestedModel === activeModelName
-            ? `Already using ${requestedModel}.`
-            : `Switched to ${requestedModel}.`,
-      };
-
-      setSelectedModelName(requestedModel);
-      setMessage("");
-      setAttachedFiles([]);
-      setSelectedPreviewFileId(null);
-      setIsPreviewOpen(false);
-
-      if (fileInputRef.current) {
-        fileInputRef.current.value = "";
-      }
-
-      setSessions((current) =>
-        current.map((session) => {
-          if (session.id !== activeSession.id) {
-            return session;
-          }
-
-          return {
-            ...session,
-            title:
-              session.title === "New chat"
-                ? `Using ${requestedModel}`.slice(0, 42)
-                : session.title,
-            turns: [
-              ...session.turns,
-              userTurn,
-              assistantTurn,
-            ],
-            updatedAt: Date.now(),
-          };
-        }),
-      );
-
-      return;
-    }
-
-    setAttachedFiles([]);
-    setSelectedPreviewFileId(null);
-    setIsPreviewOpen(false);
-
-    if (fileInputRef.current) {
-      fileInputRef.current.value = "";
-    }
+    clearComposerAttachmentsAfterSend();
 
     await runAssistantReply({
       sessionId: activeSession.id,
@@ -2561,7 +2809,7 @@ function App() {
           <div className="drag-overlay-panel">
             <strong>Drop files here</strong>
             <span>
-              Text, Markdown, RTF, and DOCX files will include a preview
+              Text files include previews. Use Attach folder for project context.
             </span>
           </div>
         </div>
@@ -2658,7 +2906,8 @@ function App() {
                       );
                     }}
                   >
-                    {editingSessionId === session.id ? (
+                    {editingSessionId === session.id &&
+                    session.id !== activeSession.id ? (
                       <input
                         className="history-rename-input"
                         value={draftTitle}
@@ -2793,7 +3042,9 @@ function App() {
           <div className="header-actions">
             <div className="header-toolbar">
               <div className="model-select-shell">
-                <span className="toolbar-label">Model</span>
+                <span className="model-local-status" aria-label="Local model">
+                  <i aria-hidden="true" />
+                </span>
 
                 <button
                   type="button"
@@ -2871,6 +3122,24 @@ function App() {
             className="file-input"
             aria-hidden="true"
             tabIndex={-1}
+          />
+
+          <input
+            ref={folderInputRef}
+            type="file"
+            multiple
+            accept=".md,.txt,.json,.ts,.tsx,.js,.jsx,.css,.html,.rs,.toml,.env.example,.gitignore"
+            onChange={(event) => {
+              void addBrowserFolder(
+                event.currentTarget.files ?? [],
+              );
+
+              event.currentTarget.value = "";
+            }}
+            className="file-input"
+            aria-hidden="true"
+            tabIndex={-1}
+            {...folderInputAttributes}
           />
         </header>
 
@@ -3019,7 +3288,41 @@ function App() {
             </div>
           ) : (
             <div className="active-chat-heading">
-              <span>Conversation</span>
+              {editingSessionId === activeSession.id ? (
+                <input
+                  className="active-chat-title-input"
+                  value={draftTitle}
+                  autoFocus
+                  onChange={(event) =>
+                    setDraftTitle(event.currentTarget.value)
+                  }
+                  onBlur={commitRename}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter") {
+                      event.currentTarget.blur();
+                    }
+
+                    if (event.key === "Escape") {
+                      setEditingSessionId(null);
+                    }
+                  }}
+                  aria-label="Chat title"
+                />
+              ) : (
+                <>
+                  <strong>{activeSession.title}</strong>
+
+                  <button
+                    type="button"
+                    className="active-chat-title-edit"
+                    onClick={() => startRename(activeSession.id)}
+                    aria-label="Edit chat title"
+                    title="Edit chat title"
+                  >
+                    <EditIcon className="ui-icon" />
+                  </button>
+                </>
+              )}
 
               {isGenerating ? (
                 <small>Generating</small>
@@ -3051,17 +3354,27 @@ function App() {
                     {isPreviewOpen ? "Hide preview" : "Preview"}
                   </span>
                 </button>
+
+                {selectedPreviewFile.kind === "folder" ? (
+                  <button
+                    type="button"
+                    className="file-preview-detach"
+                    onClick={() => removeFile(selectedPreviewFile.id)}
+                  >
+                    Detach
+                  </button>
+                ) : null}
               </div>
 
               {isPreviewOpen ? (
                 <>
-                  {attachedFiles.length > 1 ? (
+                  {contextAttachments.length > 1 ? (
                     <div
                       className="file-preview-tabs"
                       role="tablist"
                       aria-label="Attached files"
                     >
-                      {attachedFiles.map((file) => (
+                      {contextAttachments.map((file) => (
                         <button
                           key={file.id}
                           type="button"
@@ -3080,6 +3393,29 @@ function App() {
                           <span>{file.sizeLabel}</span>
                         </button>
                       ))}
+                    </div>
+                  ) : null}
+
+                  {selectedPreviewFile.folderStats ? (
+                    <div className="folder-scan-summary">
+                      <span>
+                        Attached folder:{" "}
+                        <strong>
+                          {selectedPreviewFile.folderStats.rootName}
+                        </strong>
+                      </span>
+                      <span>
+                        {selectedPreviewFile.folderStats.filesFound} files found
+                      </span>
+                      <span>
+                        {selectedPreviewFile.folderStats.filesIncluded} included
+                      </span>
+                      <span>
+                        {selectedPreviewFile.folderStats.filesIgnored} ignored
+                      </span>
+                      <span>
+                        {selectedPreviewFile.folderStats.filesSkipped} skipped
+                      </span>
                     </div>
                   ) : null}
 
@@ -3121,7 +3457,9 @@ function App() {
                     <span className="file-preview-status">
                       {previewMode === "sent"
                         ? "Current draft plus attached file context"
-                        : selectedPreviewFile.supported
+                        : selectedPreviewFile.kind === "folder"
+                          ? "Ready for local project questions"
+                          : selectedPreviewFile.supported
                           ? "Ready for local analysis"
                           : "Preview unavailable for this file type"}
                     </span>
@@ -3166,56 +3504,106 @@ function App() {
                   return (
                     <div
                       key={turn.id}
-                      className={`turn turn-${turn.role}${
-                        isStreamingTurn
-                          ? " streaming"
-                          : ""
-                      }`}
+                      className={`turn-row turn-row-${turn.role}`}
                     >
-                      {turn.files?.length ? (
-                        <div className="message-attachments">
-                          {turn.files.map((file) => (
-                            <div
-                              key={file.id}
-                              className="message-attachment"
+                      <div
+                        className={`turn turn-${turn.role}${
+                          isStreamingTurn ? " streaming" : ""
+                        }`}
+                      >
+                        {turn.files?.length ? (
+                          <div className="message-attachments">
+                            {turn.files.map((file) => (
+                              <div
+                                key={file.id}
+                                className="message-attachment"
+                              >
+                                <strong>
+                                  {file.name}
+                                </strong>
+
+                                <span>
+                                  {file.typeLabel} ·{" "}
+                                  {file.sizeLabel}
+                                </span>
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
+
+                        {isStreamingTurn ? (
+                          <p ref={streamingTextElementRef}>
+                            {turn.content}
+                          </p>
+                        ) : (
+                          <div className="message-markdown">
+                            {renderMarkdown(turn.content)}
+                          </div>
+                        )}
+
+                        {turn.role === "assistant" ? (
+                          <div className="turn-actions turn-actions-assistant">
+                            <button
+                              type="button"
+                              className="turn-action-button"
+                              aria-label="Copy response"
+                              title="Copy response"
+                              onClick={() => void copyResponse(turn.content)}
                             >
-                              <strong>
-                                {file.name}
-                              </strong>
+                              <CopyIcon className="turn-action-icon" />
+                            </button>
 
-                              <span>
-                                {file.typeLabel} ·{" "}
-                                {file.sizeLabel}
-                              </span>
-                            </div>
-                          ))}
-                        </div>
-                      ) : null}
+                            <button
+                              type="button"
+                              className="turn-action-button"
+                              aria-label="Download response as Markdown"
+                              title="Download response as Markdown"
+                              onClick={() => downloadResponse(turn.content)}
+                            >
+                              <DownloadIcon className="turn-action-icon" />
+                            </button>
 
-                      {isStreamingTurn ? (
-                        <p ref={streamingTextElementRef}>
-                          {turn.content}
-                        </p>
-                      ) : (
-                        <div className="message-markdown">
-                          {renderMarkdown(turn.content)}
-                        </div>
-                      )}
+                            {canRegenerateTurn ? (
+                              <button
+                                type="button"
+                                className="turn-action-button"
+                                aria-label="Regenerate response"
+                                title="Regenerate response"
+                                disabled={isGenerating || !activeModelName}
+                                onClick={() => {
+                                  void regenerateLastResponse();
+                                }}
+                              >
+                                <RegenerateIcon className="turn-action-icon" />
+                              </button>
+                            ) : null}
+                          </div>
+                        ) : (
+                          <div className="turn-actions turn-actions-user">
+                            <button
+                              type="button"
+                              className="turn-action-button"
+                              aria-label="Edit prompt"
+                              title="Edit prompt"
+                              disabled={isGenerating}
+                              onClick={() => editPrompt(turn)}
+                            >
+                              <EditIcon className="turn-action-icon" />
+                            </button>
+                          </div>
+                        )}
+                      </div>
 
-                      {canRegenerateTurn ? (
-                        <div className="turn-actions">
-                          <button
-                            type="button"
-                            className="turn-action-button"
-                            disabled={isGenerating || !activeModelName}
-                            onClick={() => {
-                              void regenerateLastResponse();
-                            }}
-                          >
-                            Regenerate
-                          </button>
-                        </div>
-                      ) : null}
+                      <time
+                        className="turn-timestamp"
+                        dateTime={
+                          turn.createdAt
+                            ? new Date(turn.createdAt).toISOString()
+                            : undefined
+                        }
+                      >
+                        {formatLocalTime(turn.createdAt)}
+                      </time>
                     </div>
                   );
                 })
@@ -3236,6 +3624,7 @@ function App() {
             message={message}
             messageRef={messageRef}
             onAttach={openFilePicker}
+            onAttachFolder={openFolderPicker}
             onCancel={() => {
               setIsCanceling(true);
               cancelChat();
