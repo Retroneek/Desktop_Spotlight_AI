@@ -2821,6 +2821,12 @@ function App() {
         }`}
       >
         <div className="sidebar-header">
+          <div className="product-brand" aria-label="Spotlight Local AI">
+            <span className="product-mark" aria-hidden="true">✦</span>
+            <span className="product-name">Spotlight</span>
+            <small>Local AI</small>
+          </div>
+
           <div className="sidebar-header-bar">
             <button
               type="button"
@@ -3282,9 +3288,21 @@ function App() {
         <section className="card chat-canvas">
           {activeSession.turns.length === 0 ? (
             <div className="canvas-greeting">
+              <span className="greeting-mark" aria-hidden="true">✦</span>
               <h3>{emptyStateContent.title}</h3>
 
               <p>{emptyStateContent.description}</p>
+
+              {!hasDraftMessage && !attachedFiles.length ? (
+                <div className="canvas-starter-actions" aria-label="Starter prompts">
+                  <button type="button" onClick={() => editPrompt({ id: "starter", role: "user", content: "Help me plan my next task." })}>
+                    Plan a task
+                  </button>
+                  <button type="button" onClick={() => editPrompt({ id: "starter", role: "user", content: "Summarize the file I attached." })}>
+                    Summarize a file
+                  </button>
+                </div>
+              ) : null}
             </div>
           ) : (
             <div className="active-chat-heading">
