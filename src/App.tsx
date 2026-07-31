@@ -1,8 +1,7 @@
 import {
   type DragEvent,
   type KeyboardEvent,
-  type ReactNode,
-  type RefObject,
+  useDeferredValue,
   useEffect,
   useLayoutEffect,
   useMemo,
@@ -11,1605 +10,70 @@ import {
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import {
-  buildPrompt,
+  buildBackgroundContext,
   buildCompactPrompt,
+  buildPrompt,
   createFolderAttachmentFromScan,
-  type ContextAttachment,
   type ProjectFolderScan,
-  type SkippedFolderFile,
   summarizeBrowserFolder,
   truncateContext,
 } from "./services/contextBuilder";
-import { type OllamaChatOptions, useOllama } from "./services/ollama";
+import {
+  getModelList,
+  getModelName,
+  getModelPreferenceScore,
+} from "./services/models";
+import { useOllama } from "./services/ollama";
+import { buildProjectRetrievalQuery } from "./services/chatProtocol";
+import { normalizeOllamaBaseUrl } from "./services/endpoint";
+import {
+  composerLayout,
+  folderInputAttributes,
+  maxMessageHeight,
+  runtimeProfiles,
+  storageKeys,
+  type HardwareProfileId,
+} from "./app/config";
+import {
+  buildAttachmentAwarePrompt,
+  buildGenerationOptions,
+  buildMessages,
+} from "./app/chat";
+import {
+  hasDraggedFiles,
+  isTauriRuntime,
+  summarizeFile,
+} from "./app/fileAttachments";
+import {
+  createId,
+  createPersistableSessions,
+  createSession,
+  getHistoryGroupLabel,
+  getInitialAppState,
+  getInitialAttachedFiles,
+  getInitialHardwareProfile,
+  getInitialOllamaEndpoint,
+  getInitialSelectedModel,
+  getInitialSidebarCollapsed,
+  getInitialTheme,
+} from "./app/sessionStorage";
+import type {
+  AttachedFile,
+  ChatSession,
+  ChatTurn,
+  HistoryMenuState,
+  OllamaMessage,
+  RegenerateTarget,
+  Theme,
+} from "./app/types";
+import { EditIcon } from "./components/icons";
+import { ConversationLog } from "./components/ConversationLog";
+import { FilePreview, type PreviewMode } from "./components/FilePreview";
+import { MessageComposer } from "./components/MessageComposer";
+import { ModelSelector } from "./components/ModelSelector";
+import { SettingsPanel } from "./components/SettingsPanel";
+import { Sidebar } from "./components/Sidebar";
 import "./App.css";
-
-const hardwareProfiles = [
-  {
-    id: "low-power",
-    label: "Low Power",
-    description: "Smaller local models and shorter previews for limited hardware.",
-  },
-  {
-    id: "balanced",
-    label: "Balanced",
-    description: "Default profile for everyday local analysis and chat.",
-  },
-  {
-    id: "high-quality",
-    label: "High Quality",
-    description: "Stronger local models and longer context on capable machines.",
-  },
-  {
-    id: "custom",
-    label: "Custom",
-    description: "Manual local setup for advanced users and non-default endpoints.",
-  },
-] as const;
-
-const runtimeProfiles = {
-  "low-power": {
-    previewCharacters: 1200,
-    recentMessageCount: 6,
-    systemNote:
-      "Keep responses reasonably efficient for smaller local models, but still sound conversational and helpful.",
-  },
-  balanced: {
-    previewCharacters: 2500,
-    recentMessageCount: 12,
-    systemNote:
-      "Balance responsiveness with enough context and detail to feel useful.",
-  },
-  "high-quality": {
-    previewCharacters: 5000,
-    recentMessageCount: 18,
-    systemNote:
-      "Use fuller context and provide richer explanations when they would help.",
-  },
-  custom: {
-    previewCharacters: 7000,
-    recentMessageCount: 20,
-    systemNote:
-      "Use the broader available context, while staying grounded in the supplied files and chat history.",
-  },
-} satisfies Record<
-  HardwareProfileId,
-  {
-    previewCharacters: number;
-    recentMessageCount: number;
-    systemNote: string;
-  }
->;
-
-type TaskMode =
-  | "coding"
-  | "reasoning"
-  | "writing"
-  | "file-analysis"
-  | "general";
-type HardwareProfileId = (typeof hardwareProfiles)[number]["id"];
-type Theme = "dark" | "light";
-
-type AttachedFile = ContextAttachment;
-
-type ChatTurn = {
-  id: string;
-  role: "user" | "assistant";
-  content: string;
-  files?: AttachedFile[];
-  createdAt?: number;
-};
-
-type ChatSession = {
-  id: string;
-  title: string;
-  turns: ChatTurn[];
-  createdAt: number;
-  updatedAt: number;
-};
-
-type RegenerateTarget = {
-  userTurn: ChatTurn;
-  assistantTurn: ChatTurn;
-  historyBeforeUserTurn: ChatTurn[];
-};
-
-type OllamaMessage = {
-  role: "system" | "user" | "assistant";
-  content: string;
-};
-
-type HistoryMenuState = {
-  sessionId: string;
-  x: number;
-  y: number;
-};
-
-type IconProps = {
-  className?: string;
-};
-
-const storageKey = "desktop-spotlight-ai-chats";
-const activeChatStorageKey = "desktop-spotlight-ai-active-chat";
-const attachmentStorageKey = "desktop-spotlight-ai-attached-files";
-const themeStorageKey = "desktop-spotlight-ai-theme";
-const sidebarCollapsedStorageKey =
-  "desktop-spotlight-ai-sidebar-collapsed";
-const selectedModelStorageKey =
-  "desktop-spotlight-ai-selected-model";
-const hardwareProfileStorageKey =
-  "desktop-spotlight-ai-hardware-profile";
-const ollamaEndpointStorageKey =
-  "desktop-spotlight-ai-ollama-endpoint";
-
-const maxMessageLines = 10;
-const lineHeight = 18;
-const verticalPadding = 10;
-const maxMessageHeight = lineHeight * maxMessageLines + verticalPadding;
-const folderInputAttributes = {
-  webkitdirectory: "",
-  directory: "",
-} as const;
-
-const taskSystemPrompts: Record<TaskMode, string> = {
-  coding: `
-Help with coding work in a practical, collaborative way.
-Prefer the smallest useful fix, explain the why briefly, and include code only when it helps.
-When debugging, name the likely cause first, then the next step.
-`.trim(),
-
-  reasoning: `
-Think through tradeoffs clearly, then land on a practical recommendation.
-Keep the reasoning readable and conversational instead of formal.
-`.trim(),
-
-  writing: `
-Help with writing in a natural, polished voice.
-Preserve the user's intent and make the result sound human, specific, and ready to use.
-Avoid stiff filler and generic polished phrasing.
-`.trim(),
-
-  "file-analysis": `
-Use attached file content as the source of truth.
-When the user asks for a summary, compress the file into the main ideas instead of walking through every section.
-For questions, answer directly and mention file details only when they support the answer.
-`.trim(),
-
-  general: `
-Answer directly and naturally.
-Be useful, specific, and relaxed; avoid sounding like a product script.
-`.trim(),
-};
-
-function createId(prefix: string) {
-  return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-}
-
-function getTimestampFromId(id: string) {
-  const match = id.match(/-(\d{10,})/);
-  return match ? Number(match[1]) : undefined;
-}
-
-function formatLocalTime(timestamp?: number) {
-  if (!timestamp) return "";
-
-  return new Date(timestamp).toLocaleTimeString([], {
-    hour: "numeric",
-    minute: "2-digit",
-  });
-}
-
-function createSession(title = "New chat"): ChatSession {
-  const now = Date.now();
-
-  return {
-    id: createId("chat"),
-    title,
-    turns: [],
-    createdAt: now,
-    updatedAt: now,
-  };
-}
-
-function getInitialSessions(): ChatSession[] {
-  try {
-    const stored = localStorage.getItem(storageKey);
-    if (!stored) return [createSession()];
-
-    const parsed = JSON.parse(stored) as ChatSession[];
-
-    if (!Array.isArray(parsed) || parsed.length === 0) {
-      return [createSession()];
-    }
-
-    return parsed.map((session) => {
-      const createdAt =
-        typeof session.createdAt === "number" ? session.createdAt : Date.now();
-
-      return {
-        ...session,
-        title: typeof session.title === "string" ? session.title : "New chat",
-        turns: Array.isArray(session.turns)
-          ? session.turns.map((turn) => ({
-              ...turn,
-              createdAt:
-                typeof turn.createdAt === "number"
-                  ? turn.createdAt
-                  : getTimestampFromId(turn.id) ?? createdAt,
-            }))
-          : [],
-        createdAt,
-        updatedAt:
-          typeof session.updatedAt === "number"
-            ? session.updatedAt
-            : Date.now(),
-      };
-    });
-  } catch {
-    return [createSession()];
-  }
-}
-
-function getInitialAttachedFiles(): AttachedFile[] {
-  try {
-    const stored = localStorage.getItem(attachmentStorageKey);
-    if (!stored) return [];
-
-    const parsed = JSON.parse(stored) as AttachedFile[];
-    if (!Array.isArray(parsed)) return [];
-
-    return parsed.map((file) => {
-      const kind = file.kind === "folder" ? "folder" : "file";
-      const preview = typeof file.preview === "string" ? file.preview : "";
-
-      return {
-        id: typeof file.id === "string" ? file.id : createId("file"),
-        kind,
-        name: typeof file.name === "string" ? file.name : "Untitled file",
-        typeLabel:
-          typeof file.typeLabel === "string" ? file.typeLabel : "file",
-        sizeLabel:
-          typeof file.sizeLabel === "string" ? file.sizeLabel : "0 B",
-        preview:
-          kind === "folder"
-            ? truncateContext(preview, 10_000)
-            : preview,
-        supported: Boolean(file.supported),
-        folderStats:
-          file.folderStats &&
-          typeof file.folderStats === "object" &&
-          typeof file.folderStats.rootName === "string"
-            ? file.folderStats
-            : undefined,
-        skippedFiles: Array.isArray(file.skippedFiles)
-          ? file.skippedFiles.filter(
-              (item): item is SkippedFolderFile =>
-                item &&
-                typeof item === "object" &&
-                typeof item.path === "string" &&
-                typeof item.reason === "string",
-            )
-          : undefined,
-      };
-    });
-  } catch {
-    return [];
-  }
-}
-
-function getInitialAppState() {
-  const sessions = getInitialSessions();
-
-  try {
-    const storedActiveId = localStorage.getItem(activeChatStorageKey);
-
-    const activeSessionId =
-      storedActiveId &&
-      sessions.some((session) => session.id === storedActiveId)
-        ? storedActiveId
-        : sessions[0].id;
-
-    return {
-      sessions,
-      activeSessionId,
-    };
-  } catch {
-    return {
-      sessions,
-      activeSessionId: sessions[0].id,
-    };
-  }
-}
-
-function getInitialTheme(): Theme {
-  try {
-    return localStorage.getItem(themeStorageKey) === "light"
-      ? "light"
-      : "dark";
-  } catch {
-    return "dark";
-  }
-}
-
-function getInitialSidebarCollapsed() {
-  try {
-    return localStorage.getItem(sidebarCollapsedStorageKey) === "true";
-  } catch {
-    return false;
-  }
-}
-
-function getInitialSelectedModel() {
-  try {
-    return localStorage.getItem(selectedModelStorageKey) ?? "";
-  } catch {
-    return "";
-  }
-}
-
-function getInitialHardwareProfile(): HardwareProfileId {
-  try {
-    const stored = localStorage.getItem(hardwareProfileStorageKey);
-
-    if (
-      stored &&
-      hardwareProfiles.some((profile) => profile.id === stored)
-    ) {
-      return stored as HardwareProfileId;
-    }
-  } catch {
-    // Ignore localStorage access failures and fall back to default.
-  }
-
-  return "balanced";
-}
-
-function getInitialOllamaEndpoint() {
-  try {
-    return (
-      localStorage.getItem(ollamaEndpointStorageKey) ??
-      "http://127.0.0.1:11434"
-    );
-  } catch {
-    return "http://127.0.0.1:11434";
-  }
-}
-
-function formatFileSize(size: number) {
-  if (size < 1024) {
-    return `${size} B`;
-  }
-
-  if (size < 1024 * 1024) {
-    return `${(size / 1024).toFixed(size < 10 * 1024 ? 1 : 0)} KB`;
-  }
-
-  return `${(size / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function isSupportedTextFile(file: File) {
-  const lowerName = file.name.toLowerCase();
-
-  return (
-    file.type === "text/plain" ||
-    file.type === "text/markdown" ||
-    file.type === "text/rtf" ||
-    file.type === "application/rtf" ||
-    file.type ===
-      "application/vnd.openxmlformats-officedocument.wordprocessingml.document" ||
-    lowerName.endsWith(".txt") ||
-    lowerName.endsWith(".md") ||
-    lowerName.endsWith(".rtf") ||
-    lowerName.endsWith(".docx")
-  );
-}
-
-function getFileTypeLabel(file: File) {
-  const lowerName = file.name.toLowerCase();
-
-  if (lowerName.endsWith(".docx")) {
-    return "Word document";
-  }
-
-  if (lowerName.endsWith(".rtf")) {
-    return "rich text";
-  }
-
-  if (lowerName.endsWith(".md")) {
-    return "text/markdown";
-  }
-
-  return file.type || "file";
-}
-
-function cleanExtractedText(text: string) {
-  return text
-    .replace(/\r\n?/g, "\n")
-    .replace(/[ \t]+\n/g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
-async function inflateZipEntry(data: Uint8Array, compressionMethod: number) {
-  if (compressionMethod === 0) {
-    return data;
-  }
-
-  if (compressionMethod !== 8) {
-    throw new Error("Unsupported DOCX compression method.");
-  }
-
-  const stream = new Blob([data]).stream().pipeThrough(
-    new DecompressionStream("deflate-raw"),
-  );
-
-  return new Uint8Array(await new Response(stream).arrayBuffer());
-}
-
-async function readZipTextEntry(
-  file: File,
-  entryName: string,
-): Promise<string | null> {
-  const bytes = new Uint8Array(await file.arrayBuffer());
-  const view = new DataView(bytes.buffer);
-  let endOfCentralDirectory = -1;
-
-  for (let index = bytes.length - 22; index >= 0; index -= 1) {
-    if (view.getUint32(index, true) === 0x06054b50) {
-      endOfCentralDirectory = index;
-      break;
-    }
-  }
-
-  if (endOfCentralDirectory === -1) {
-    throw new Error("Could not read DOCX zip directory.");
-  }
-
-  const entryCount = view.getUint16(endOfCentralDirectory + 10, true);
-  let centralDirectoryOffset = view.getUint32(
-    endOfCentralDirectory + 16,
-    true,
-  );
-  const decoder = new TextDecoder();
-
-  for (let entryIndex = 0; entryIndex < entryCount; entryIndex += 1) {
-    if (view.getUint32(centralDirectoryOffset, true) !== 0x02014b50) {
-      throw new Error("Invalid DOCX zip directory.");
-    }
-
-    const compressionMethod = view.getUint16(
-      centralDirectoryOffset + 10,
-      true,
-    );
-    const compressedSize = view.getUint32(
-      centralDirectoryOffset + 20,
-      true,
-    );
-    const fileNameLength = view.getUint16(
-      centralDirectoryOffset + 28,
-      true,
-    );
-    const extraLength = view.getUint16(centralDirectoryOffset + 30, true);
-    const commentLength = view.getUint16(
-      centralDirectoryOffset + 32,
-      true,
-    );
-    const localHeaderOffset = view.getUint32(
-      centralDirectoryOffset + 42,
-      true,
-    );
-    const fileNameStart = centralDirectoryOffset + 46;
-    const fileName = decoder.decode(
-      bytes.slice(fileNameStart, fileNameStart + fileNameLength),
-    );
-
-    if (fileName === entryName) {
-      if (view.getUint32(localHeaderOffset, true) !== 0x04034b50) {
-        throw new Error("Invalid DOCX file entry.");
-      }
-
-      const localFileNameLength = view.getUint16(
-        localHeaderOffset + 26,
-        true,
-      );
-      const localExtraLength = view.getUint16(
-        localHeaderOffset + 28,
-        true,
-      );
-      const dataStart =
-        localHeaderOffset + 30 + localFileNameLength + localExtraLength;
-      const compressedData = bytes.slice(
-        dataStart,
-        dataStart + compressedSize,
-      );
-      const inflated = await inflateZipEntry(
-        compressedData,
-        compressionMethod,
-      );
-
-      return decoder.decode(inflated);
-    }
-
-    centralDirectoryOffset +=
-      46 + fileNameLength + extraLength + commentLength;
-  }
-
-  return null;
-}
-
-function extractTextFromWordXml(xmlText: string) {
-  const xml = new DOMParser().parseFromString(xmlText, "application/xml");
-  const paragraphs = Array.from(xml.getElementsByTagNameNS("*", "p"));
-
-  if (!paragraphs.length) {
-    return cleanExtractedText(xml.documentElement.textContent ?? "");
-  }
-
-  function collectText(node: Node): string {
-    if (node.nodeType === Node.TEXT_NODE) {
-      return node.textContent ?? "";
-    }
-
-    if (node.nodeType !== Node.ELEMENT_NODE) {
-      return "";
-    }
-
-    const element = node as Element;
-
-    if (element.localName === "t") {
-      return element.textContent ?? "";
-    }
-
-    if (element.localName === "tab") {
-      return "\t";
-    }
-
-    if (element.localName === "br" || element.localName === "cr") {
-      return "\n";
-    }
-
-    return Array.from(element.childNodes).map(collectText).join("");
-  }
-
-  return cleanExtractedText(paragraphs.map(collectText).join("\n"));
-}
-
-async function extractDocxText(file: File) {
-  const documentXml = await readZipTextEntry(file, "word/document.xml");
-
-  if (!documentXml) {
-    throw new Error("DOCX document text was not found.");
-  }
-
-  return extractTextFromWordXml(documentXml);
-}
-
-function extractRtfText(rtf: string) {
-  const ignoredDestinations = new Set([
-    "colortbl",
-    "fonttbl",
-    "generator",
-    "info",
-    "pict",
-    "stylesheet",
-  ]);
-  const stack: boolean[] = [];
-  let output = "";
-  let index = 0;
-  let ignored = false;
-
-  while (index < rtf.length) {
-    const character = rtf[index];
-
-    if (character === "{") {
-      stack.push(ignored);
-      index += 1;
-
-      if (rtf[index] === "\\" && rtf[index + 1] === "*") {
-        ignored = true;
-        index += 2;
-      }
-
-      continue;
-    }
-
-    if (character === "}") {
-      ignored = stack.pop() ?? false;
-      index += 1;
-      continue;
-    }
-
-    if (character !== "\\") {
-      if (!ignored) {
-        output += character;
-      }
-
-      index += 1;
-      continue;
-    }
-
-    const escaped = rtf[index + 1];
-
-    if (escaped === "\\" || escaped === "{" || escaped === "}") {
-      if (!ignored) {
-        output += escaped;
-      }
-
-      index += 2;
-      continue;
-    }
-
-    if (escaped === "'") {
-      const hex = rtf.slice(index + 2, index + 4);
-
-      if (!ignored && /^[0-9a-f]{2}$/i.test(hex)) {
-        output += String.fromCharCode(Number.parseInt(hex, 16));
-      }
-
-      index += 4;
-      continue;
-    }
-
-    const match = rtf.slice(index + 1).match(/^([a-z]+)(-?\d+)? ?/i);
-
-    if (!match) {
-      index += 2;
-      continue;
-    }
-
-    const controlWord = match[1].toLowerCase();
-
-    if (ignoredDestinations.has(controlWord)) {
-      ignored = true;
-    }
-
-    if (!ignored) {
-      if (controlWord === "par" || controlWord === "line") {
-        output += "\n";
-      } else if (controlWord === "tab") {
-        output += "\t";
-      }
-    }
-
-    index += 1 + match[0].length;
-  }
-
-  return cleanExtractedText(output);
-}
-
-async function extractFileText(file: File) {
-  const lowerName = file.name.toLowerCase();
-
-  if (lowerName.endsWith(".docx")) {
-    return extractDocxText(file);
-  }
-
-  const text = await file.text();
-
-  if (lowerName.endsWith(".rtf") || file.type === "text/rtf") {
-    return extractRtfText(text);
-  }
-
-  return cleanExtractedText(text);
-}
-
-async function summarizeFile(
-  file: File,
-  previewCharacterLimit: number,
-): Promise<AttachedFile> {
-  const supported = isSupportedTextFile(file);
-  const typeLabel = getFileTypeLabel(file);
-
-  let preview = "Preview unavailable for this file type.";
-
-  if (supported) {
-    try {
-      const text = await extractFileText(file);
-
-      preview = text
-        ? text.slice(0, previewCharacterLimit)
-        : "No readable text found in this file.";
-    } catch (error) {
-      const message =
-        error instanceof Error ? error.message : "Could not read file.";
-
-      preview = `Could not extract text: ${message}`;
-    }
-  }
-
-  return {
-    id: `${file.name}-${file.lastModified}-${file.size}`,
-    kind: "file",
-    name: file.name,
-    typeLabel,
-    sizeLabel: formatFileSize(file.size),
-    preview,
-    supported,
-  };
-}
-
-function isTauriRuntime() {
-  return "__TAURI_INTERNALS__" in window;
-}
-
-function hasDraggedFiles(event: DragEvent<HTMLElement>) {
-  return Array.from(event.dataTransfer.types).includes("Files");
-}
-
-function getModelName(model: unknown) {
-  if (typeof model === "string") {
-    return model;
-  }
-
-  if (typeof model === "object" && model !== null) {
-    const candidate = model as {
-      name?: unknown;
-      model?: unknown;
-    };
-
-    if (typeof candidate.name === "string") {
-      return candidate.name;
-    }
-
-    if (typeof candidate.model === "string") {
-      return candidate.model;
-    }
-  }
-
-  return undefined;
-}
-
-function getModelList(models: unknown) {
-  if (Array.isArray(models)) {
-    return models;
-  }
-
-  if (typeof models === "object" && models !== null) {
-    const candidate = models as {
-      models?: unknown;
-    };
-
-    if (Array.isArray(candidate.models)) {
-      return candidate.models;
-    }
-  }
-
-  return [];
-}
-
-function getModelDisplayName(modelName: string) {
-  const withoutNamespace = modelName.split("/").pop() ?? modelName;
-  const baseName = withoutNamespace.replace(/:.+$/i, "");
-  const normalized = baseName.toLowerCase();
-
-  const friendlyMatches: Array<[RegExp, string]> = [
-    [/^llama(?:-| )?3(?:\.| )?2\b/i, "Llama 3.2"],
-    [/^llama(?:-| )?3(?:\.| )?1\b/i, "Llama 3.1"],
-    [/^codellama\b/i, "Code Llama"],
-    [/^mistral\b/i, "Mistral"],
-    [/^mixtral\b/i, "Mixtral"],
-    [/^phi(?:-| )?3\b/i, "Phi 3"],
-    [/^qwen(?:-| )?2(?:\.| )?5\b/i, "Qwen 2.5"],
-    [/^gemma(?:-| )?2\b/i, "Gemma 2"],
-    [/^deepseek(?:-| )?coder\b/i, "DeepSeek Coder"],
-  ];
-
-  for (const [pattern, label] of friendlyMatches) {
-    if (pattern.test(normalized)) {
-      return label;
-    }
-  }
-
-  const titled = baseName
-    .replace(/[-_]/g, " ")
-    .replace(/\s+/g, " ")
-    .trim()
-    .replace(/\b[a-z]/g, (match) => match.toUpperCase());
-
-  if (titled.length <= 18) {
-    return titled;
-  }
-
-  return `${titled.slice(0, 15)}...`;
-}
-
-function getHistoryGroupLabel(timestamp: number) {
-  const date = new Date(timestamp);
-  const today = new Date();
-  const startOfToday = new Date(
-    today.getFullYear(),
-    today.getMonth(),
-    today.getDate(),
-  );
-  const startOfTarget = new Date(
-    date.getFullYear(),
-    date.getMonth(),
-    date.getDate(),
-  );
-
-  const dayDifference = Math.round(
-    (startOfToday.getTime() - startOfTarget.getTime()) /
-      (1000 * 60 * 60 * 24),
-  );
-
-  if (dayDifference === 0) {
-    return "Today";
-  }
-
-  if (dayDifference === 1) {
-    return "Yesterday";
-  }
-
-  if (dayDifference > 1 && dayDifference < 7) {
-    return date.toLocaleDateString(undefined, {
-      weekday: "long",
-    });
-  }
-
-  if (date.getFullYear() === today.getFullYear()) {
-    return date.toLocaleDateString(undefined, {
-      month: "short",
-      day: "numeric",
-    });
-  }
-
-  return date.toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
-}
-
-function CollapseIcon({ className }: IconProps) {
-  return (
-    <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
-      <path
-        d="M9.5 3.5 5.5 8l4 4.5"
-        fill="none"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.6"
-      />
-    </svg>
-  );
-}
-
-function NewChatIcon({ className }: IconProps) {
-  return (
-    <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
-      <path
-        d="M8 3.25v9.5M3.25 8h9.5"
-        fill="none"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeWidth="1.6"
-      />
-    </svg>
-  );
-}
-
-function MoreIcon({ className }: IconProps) {
-  return (
-    <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
-      <circle cx="3.5" cy="8" r="1.2" fill="currentColor" />
-      <circle cx="8" cy="8" r="1.2" fill="currentColor" />
-      <circle cx="12.5" cy="8" r="1.2" fill="currentColor" />
-    </svg>
-  );
-}
-
-function SettingsIcon({ className }: IconProps) {
-  return (
-    <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
-      <path
-        d="M6.6 2.2h2.8l.35 1.52c.35.12.69.27 1 .46l1.42-.67 1.4 2.42-1.06 1.02c.04.19.06.39.06.6s-.02.41-.06.6l1.06 1.02-1.4 2.42-1.42-.67c-.31.19-.65.34-1 .46l-.35 1.52H6.6l-.35-1.52a4.74 4.74 0 0 1-1-.46l-1.42.67-1.4-2.42 1.06-1.02A3.4 3.4 0 0 1 3.43 8c0-.21.02-.41.06-.6L2.43 6.38l1.4-2.42 1.42.67c.31-.19.65-.34 1-.46L6.6 2.2Z"
-        fill="none"
-        stroke="currentColor"
-        strokeLinejoin="round"
-        strokeWidth="1.2"
-      />
-      <circle cx="8" cy="8" r="1.85" fill="none" stroke="currentColor" strokeWidth="1.2" />
-    </svg>
-  );
-}
-
-function AttachIcon({ className }: IconProps) {
-  return (
-    <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
-      <path
-        d="M5.9 8.1 9.6 4.4a2.15 2.15 0 1 1 3.05 3.05L7.8 12.3a3.2 3.2 0 1 1-4.55-4.55l5.1-5.1"
-        fill="none"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.4"
-      />
-    </svg>
-  );
-}
-
-function SendIcon({ className }: IconProps) {
-  return (
-    <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
-      <path
-        d="M2.2 7.8 13.5 2.9l-3.9 10.2-2.1-3.2-5.3-2.1Z"
-        fill="none"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.4"
-      />
-      <path d="M13.45 2.95 7.4 9" fill="none" stroke="currentColor" strokeLinecap="round" strokeWidth="1.4" />
-    </svg>
-  );
-}
-
-function isSummaryRequest(content: string) {
-  return /\b(summarize|summarise|summary|sum up|tldr|tl;dr|quick recap|overview|what is this about|what's this about)\b/i.test(
-    content,
-  );
-}
-
-function isCodeTaskRequest(content: string) {
-  return /\b(code|coding|bug|debug|typescript|javascript|react|tauri|rust|python|function|component|api|error|stack trace|compile|build|test|refactor|implement|fix|change|update|edit)\b/i.test(
-    content,
-  );
-}
-
-function detectTaskMode(content: string, files: AttachedFile[]): TaskMode {
-  const text = content.toLowerCase();
-  const fileNames = files.map((file) => file.name.toLowerCase()).join(" ");
-  const hasFolderContext = files.some((file) => file.kind === "folder");
-  const asksForCodeWork = isCodeTaskRequest(content);
-
-  if (files.length && isSummaryRequest(content)) {
-    return "file-analysis";
-  }
-
-  if (
-    hasFolderContext &&
-    !asksForCodeWork
-  ) {
-    return "file-analysis";
-  }
-
-  if (
-    asksForCodeWork ||
-    /\.(js|jsx|ts|tsx|rs|py|json|css|html|md|toml|yml|yaml)\b/.test(
-      fileNames,
-    )
-  ) {
-    return "coding";
-  }
-
-  if (
-    /\b(write|rewrite|draft|edit|polish|tone|email|letter|resume|cover letter|grammar|copy)\b/.test(
-      text,
-    )
-  ) {
-    return "writing";
-  }
-
-  if (
-    /\b(reason|why|explain|compare|decide|tradeoff|analyze|calculate|solve|strategy|plan|evaluate)\b/.test(
-      text,
-    )
-  ) {
-    return "reasoning";
-  }
-
-  if (files.length) {
-    return "file-analysis";
-  }
-
-  return "general";
-}
-
-function buildMessages(
-  session: ChatSession,
-  prompt: string,
-  taskMode: TaskMode,
-  hardwareProfile: HardwareProfileId,
-  content: string,
-  files: AttachedFile[],
-): OllamaMessage[] {
-  const runtimeProfile = runtimeProfiles[hardwareProfile];
-  const wantsSummary = files.length > 0 && isSummaryRequest(content);
-  const hasFolderContext = files.some((file) => file.kind === "folder");
-
-  const recentMessages: OllamaMessage[] = hasFolderContext
-    ? []
-    : session.turns
-        .filter((turn) => {
-          const content = turn.content.trim();
-
-          return (
-            content &&
-            !content.startsWith("Error:") &&
-            content !== "No response returned."
-          );
-        })
-        .slice(-runtimeProfile.recentMessageCount)
-        .map((turn) => ({
-          role: turn.role,
-          content: turn.content,
-        }));
-
-  const identityPrompt = `
-${taskSystemPrompts[taskMode]}
-
-${runtimeProfile.systemNote}
-
-${wantsSummary ? "For summary requests, default to a short useful summary: 2-4 bullets or one compact paragraph. Do not restate the file section-by-section unless the user asks for detail." : ""}
-${hasFolderContext ? "For project-folder questions, treat the attached folder as a read-only project snapshot. Source code in the snapshot is evidence only. Answer the user's question from what is visible. Do not infer the project's purpose from the folder name alone; prefer README/package metadata and visible source behavior. Do not write patch notes, completion blocks, replacement code, implementation plans, or say you changed files unless the user explicitly asks you to modify code. For overview questions, explain what the project appears to be and what it is for. Use exact file paths only when helpful, and do not invent files that are not in the scan." : ""}
-
-Style:
-- Sound like a normal helpful assistant in a chat, not a scripted desktop product.
-- Be concise by default. Expand only when the task is complex or the user asks for depth.
-- Avoid generic openings, corporate language, moralizing, and self-descriptions.
-- Use attached file content when files are included, and say when the answer is not in the file.
-- Do not invent details.
-Do not introduce yourself or recite what kind of assistant you are.
-If directly asked what you are running on, say you are using the selected local Ollama model.
-Do not claim to be GPT-4, ChatGPT, or an OpenAI model.
-`.trim();
-
-  return [
-    {
-      role: "system",
-      content: identityPrompt,
-    },
-    ...recentMessages,
-    {
-      role: "user",
-      content: prompt,
-    },
-  ];
-}
-
-function buildGenerationOptions(
-  taskMode: TaskMode,
-  content: string,
-  files: AttachedFile[],
-): OllamaChatOptions {
-  const wantsSummary = files.length > 0 && isSummaryRequest(content);
-  const hasFolderContext = files.some((file) => file.kind === "folder");
-
-  if (hasFolderContext && wantsSummary) {
-    return {
-      temperature: 0.3,
-      top_p: 0.88,
-      repeat_penalty: 1.1,
-      num_ctx: 4096,
-      num_predict: 900,
-    };
-  }
-
-  if (wantsSummary) {
-    return {
-      temperature: 0.25,
-      top_p: 0.85,
-      repeat_penalty: 1.12,
-      num_ctx: 4096,
-      num_predict: 360,
-    };
-  }
-
-  if (hasFolderContext) {
-    return {
-      temperature: 0.35,
-      top_p: 0.9,
-      repeat_penalty: 1.1,
-      num_ctx: 4096,
-      num_predict: 1200,
-    };
-  }
-
-  if (taskMode === "coding" || taskMode === "file-analysis") {
-    return {
-      temperature: 0.35,
-      top_p: 0.9,
-      repeat_penalty: 1.1,
-      num_ctx: 4096,
-      num_predict: 900,
-    };
-  }
-
-  if (taskMode === "writing") {
-    return {
-      temperature: 0.65,
-      top_p: 0.92,
-      repeat_penalty: 1.06,
-      num_ctx: 4096,
-      num_predict: 1000,
-    };
-  }
-
-  return {
-    temperature: 0.5,
-    top_p: 0.9,
-    repeat_penalty: 1.08,
-    num_ctx: 4096,
-    num_predict: 700,
-  };
-}
-
-function renderInlineMarkdown(text: string, keyPrefix: string): ReactNode[] {
-  const parts: ReactNode[] = [];
-  let cursor = 0;
-  const inlinePattern =
-    /(`([^`]+)`)|(\[([^\]]+)\]\((https?:\/\/[^\s)]+)\))|(\*\*\*([^*]+)\*\*\*)|(\*\*([^*]+)\*\*)|(\*([^*\s](?:[^*]*?[^*\s])?)\*)/g;
-
-  for (const match of text.matchAll(inlinePattern)) {
-    const matchIndex = match.index ?? 0;
-    const raw = match[0];
-
-    if (matchIndex > cursor) {
-      parts.push(text.slice(cursor, matchIndex));
-    }
-
-    const key = `${keyPrefix}-${matchIndex}`;
-
-    if (match[2]) {
-      parts.push(<code key={key}>{match[2]}</code>);
-    } else if (match[4] && match[5]) {
-      parts.push(
-        <a
-          key={key}
-          href={match[5]}
-          target="_blank"
-          rel="noreferrer"
-        >
-          {match[4]}
-        </a>,
-      );
-    } else if (match[7]) {
-      parts.push(
-        <strong key={key}>
-          <em>{match[7]}</em>
-        </strong>,
-      );
-    } else if (match[9]) {
-      parts.push(<strong key={key}>{match[9]}</strong>);
-    } else if (match[11]) {
-      parts.push(<em key={key}>{match[11]}</em>);
-    }
-
-    cursor = matchIndex + raw.length;
-  }
-
-  if (cursor < text.length) {
-    parts.push(text.slice(cursor));
-  }
-
-  return parts;
-}
-
-function isTableDivider(line: string) {
-  return /^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(
-    line,
-  );
-}
-
-function splitTableCells(line: string) {
-  return line
-    .trim()
-    .replace(/^\|/, "")
-    .replace(/\|$/, "")
-    .split("|")
-    .map((cell) => cell.trim());
-}
-
-function isMarkdownTable(lines: string[], index: number) {
-  return (
-    lines[index]?.includes("|") &&
-    lines[index + 1]?.includes("|") &&
-    isTableDivider(lines[index + 1])
-  );
-}
-
-function renderMarkdown(text: string): ReactNode[] {
-  const blocks: ReactNode[] = [];
-  const lines = text.replace(/\r\n/g, "\n").split("\n");
-  let index = 0;
-
-  function pushParagraph(startIndex: number) {
-    const paragraphLines: string[] = [];
-
-    while (index < lines.length) {
-      const line = lines[index];
-
-      if (
-        !line.trim() ||
-        /^#{1,6}\s+/.test(line) ||
-        /^```/.test(line.trim()) ||
-        /^>\s?/.test(line) ||
-        /^[-*]\s+/.test(line) ||
-        /^\d+\.\s+/.test(line) ||
-        isMarkdownTable(lines, index)
-      ) {
-        break;
-      }
-
-      paragraphLines.push(line.trim());
-      index += 1;
-    }
-
-    const paragraph = paragraphLines.join(" ").trim();
-    if (paragraph) {
-      blocks.push(
-        <p key={`p-${startIndex}`}>
-          {renderInlineMarkdown(paragraph, `p-${startIndex}`)}
-        </p>,
-      );
-    }
-  }
-
-  while (index < lines.length) {
-    const line = lines[index];
-    const trimmed = line.trim();
-    const blockKey = `${index}-${blocks.length}`;
-
-    if (!trimmed) {
-      index += 1;
-      continue;
-    }
-
-    if (/^(-{3,}|\*{3,}|_{3,})$/.test(trimmed)) {
-      blocks.push(<hr key={`hr-${blockKey}`} />);
-      index += 1;
-      continue;
-    }
-
-    if (trimmed.startsWith("```")) {
-      const language = trimmed.slice(3).trim();
-      const codeLines: string[] = [];
-      index += 1;
-
-      while (index < lines.length && !lines[index].trim().startsWith("```")) {
-        codeLines.push(lines[index]);
-        index += 1;
-      }
-
-      if (index < lines.length) {
-        index += 1;
-      }
-
-      blocks.push(
-        <pre key={`code-${blockKey}`}>
-          <code data-language={language || undefined}>
-            {codeLines.join("\n")}
-          </code>
-        </pre>,
-      );
-      continue;
-    }
-
-    const heading = /^(#{1,4})\s+(.+)$/.exec(line);
-    if (heading) {
-      const level = heading[1].length;
-      const HeadingTag = `h${Math.min(level + 2, 5)}` as
-        | "h3"
-        | "h4"
-        | "h5";
-
-      blocks.push(
-        <HeadingTag key={`h-${blockKey}`}>
-          {renderInlineMarkdown(heading[2].trim(), `h-${blockKey}`)}
-        </HeadingTag>,
-      );
-      index += 1;
-      continue;
-    }
-
-    if (isMarkdownTable(lines, index)) {
-      const headers = splitTableCells(lines[index]);
-      const rows: string[][] = [];
-      index += 2;
-
-      while (index < lines.length && lines[index].includes("|")) {
-        if (!isTableDivider(lines[index])) {
-          rows.push(splitTableCells(lines[index]));
-        }
-
-        index += 1;
-      }
-
-      blocks.push(
-        <div className="markdown-table-wrap" key={`table-${blockKey}`}>
-          <table>
-            <thead>
-              <tr>
-                {headers.map((header, cellIndex) => (
-                  <th key={`h-${cellIndex}`}>
-                    {renderInlineMarkdown(
-                      header,
-                      `table-${blockKey}-h-${cellIndex}`,
-                    )}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-
-            <tbody>
-              {rows.map((row, rowIndex) => (
-                <tr key={`r-${rowIndex}`}>
-                  {headers.map((_, cellIndex) => (
-                    <td key={`c-${cellIndex}`}>
-                      {renderInlineMarkdown(
-                        row[cellIndex] ?? "",
-                        `table-${blockKey}-${rowIndex}-${cellIndex}`,
-                      )}
-                    </td>
-                  ))}
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>,
-      );
-      continue;
-    }
-
-    const unorderedList = /^[-*]\s+/.test(line);
-    const orderedList = /^\d+\.\s+/.test(line);
-    if (unorderedList || orderedList) {
-      const items: string[] = [];
-      const listPattern = unorderedList ? /^[-*]\s+/ : /^\d+\.\s+/;
-      const ListTag = unorderedList ? "ul" : "ol";
-
-      while (index < lines.length && listPattern.test(lines[index])) {
-        items.push(lines[index].replace(listPattern, "").trim());
-        index += 1;
-      }
-
-      blocks.push(
-        <ListTag key={`list-${blockKey}`}>
-          {items.map((item, itemIndex) => (
-            <li key={itemIndex}>
-              {renderInlineMarkdown(
-                item,
-                `list-${blockKey}-${itemIndex}`,
-              )}
-            </li>
-          ))}
-        </ListTag>,
-      );
-      continue;
-    }
-
-    if (/^>\s?/.test(line)) {
-      const quoteLines: string[] = [];
-
-      while (index < lines.length && /^>\s?/.test(lines[index])) {
-        quoteLines.push(lines[index].replace(/^>\s?/, "").trim());
-        index += 1;
-      }
-
-      blocks.push(
-        <blockquote key={`quote-${blockKey}`}>
-          {renderInlineMarkdown(
-            quoteLines.join(" "),
-            `quote-${blockKey}`,
-          )}
-        </blockquote>,
-      );
-      continue;
-    }
-
-    pushParagraph(index);
-  }
-
-  return blocks;
-}
-
-type MessageComposerProps = {
-  attachedFiles: AttachedFile[];
-  canSend: boolean;
-  isExpanded: boolean;
-  isGenerating: boolean;
-  message: string;
-  messageRef: RefObject<HTMLTextAreaElement | null>;
-  onAttach: () => void;
-  onAttachFolder: () => void;
-  onCancel: () => void;
-  onKeyDown: (event: KeyboardEvent<HTMLTextAreaElement>) => void;
-  onMessageChange: (value: string) => void;
-  onRemoveFile: (fileId: string) => void;
-  onSend: () => void;
-};
-
-function MessageComposer({
-  attachedFiles,
-  canSend,
-  isExpanded,
-  isGenerating,
-  message,
-  messageRef,
-  onAttach,
-  onAttachFolder,
-  onCancel,
-  onKeyDown,
-  onMessageChange,
-  onRemoveFile,
-  onSend,
-}: MessageComposerProps) {
-  return (
-    <div className="composer-stack">
-      {attachedFiles.length ? (
-        <div
-          className="pending-attachments"
-          aria-label="Files ready to send"
-        >
-          {attachedFiles.map((file) => (
-            <div
-              key={file.id}
-              className="pending-attachment"
-            >
-              <div className="pending-file-details">
-                <strong>{file.name}</strong>
-                <span>
-                  {file.folderStats
-                    ? `${file.folderStats.filesIncluded} included · stays attached`
-                    : file.sizeLabel}
-                </span>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => onRemoveFile(file.id)}
-                aria-label={`Remove ${file.name}`}
-              >
-                ×
-              </button>
-            </div>
-          ))}
-        </div>
-      ) : null}
-
-      <div
-        className={`composer-shell${isExpanded ? " expanded" : ""}${
-          isGenerating ? " generating" : ""
-        }`}
-        aria-label="Message composer"
-      >
-        <button
-          type="button"
-          className="attach-button"
-          aria-label="Attach file"
-          disabled={isGenerating}
-          onClick={onAttach}
-        >
-          <AttachIcon className="ui-icon" />
-        </button>
-
-        <button
-          type="button"
-          className="attach-folder-button"
-          aria-label="Attach folder"
-          disabled={isGenerating}
-          onClick={onAttachFolder}
-        >
-          Folder
-        </button>
-
-        <textarea
-          ref={messageRef}
-          className="prompt-box"
-          placeholder="Ask anything or drop in a file"
-          rows={1}
-          value={message}
-          disabled={isGenerating}
-          onChange={(event) =>
-            onMessageChange(event.currentTarget.value)
-          }
-          onKeyDown={onKeyDown}
-        />
-
-        {isGenerating ? (
-          <button
-            type="button"
-            className="cancel-button composer-cancel-button"
-            onClick={onCancel}
-          >
-            Cancel
-          </button>
-        ) : null}
-
-        <button
-          type="button"
-          className="send-button"
-          aria-label="Send"
-          disabled={!canSend}
-          onClick={onSend}
-        >
-          <SendIcon className="ui-icon" />
-          <span>{isGenerating ? "Working" : "Send"}</span>
-        </button>
-      </div>
-
-      <p className="composer-hint">
-        <kbd>Enter</kbd> to send <span>·</span>{" "}
-        <kbd>Shift + Enter</kbd> for a new line
-      </p>
-    </div>
-  );
-}
-
-function CopyIcon({ className }: IconProps) {
-  return (
-    <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
-      <rect
-        x="5.3"
-        y="4.7"
-        width="7"
-        height="8"
-        rx="1.2"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.3"
-      />
-      <path
-        d="M10.5 4.7V3.8A1.5 1.5 0 0 0 9 2.3H4.2a1.5 1.5 0 0 0-1.5 1.5v5.4a1.5 1.5 0 0 0 1.5 1.5h1.1"
-        fill="none"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeWidth="1.3"
-      />
-    </svg>
-  );
-}
-
-function DownloadIcon({ className }: IconProps) {
-  return (
-    <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
-      <path
-        d="M8 2.5v7.1m0 0 2.7-2.7M8 9.6 5.3 6.9M3 12.5v.7c0 .45.35.8.8.8h8.4c.45 0 .8-.35.8-.8v-.7"
-        fill="none"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.35"
-      />
-    </svg>
-  );
-}
-
-function RegenerateIcon({ className }: IconProps) {
-  return (
-    <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
-      <path
-        d="M12.7 6.3A5.1 5.1 0 1 0 13 9.5M12.7 2.8v3.5H9.2"
-        fill="none"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.35"
-      />
-    </svg>
-  );
-}
-
-function EditIcon({ className }: IconProps) {
-  return (
-    <svg className={className} viewBox="0 0 16 16" aria-hidden="true">
-      <path
-        d="m3.1 11.3-.7 2.3 2.3-.7 7.2-7.2a1.35 1.35 0 0 0-1.9-1.9l-7.2 7.5Z"
-        fill="none"
-        stroke="currentColor"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-        strokeWidth="1.3"
-      />
-      <path
-        d="m8.9 4.9 2.1 2.1"
-        fill="none"
-        stroke="currentColor"
-        strokeWidth="1.3"
-      />
-    </svg>
-  );
-}
 
 function App() {
   const initialStateRef = useRef(getInitialAppState());
@@ -1629,6 +93,7 @@ function App() {
     error,
     refreshModels,
     cancelChat,
+    shouldReadProject,
     warmModel,
   } = useOllama(ollamaEndpoint);
 
@@ -1669,9 +134,8 @@ function App() {
     string | null
   >(null);
   const [isPreviewOpen, setIsPreviewOpen] = useState(false);
-  const [previewMode, setPreviewMode] = useState<
-    "extracted" | "sent"
-  >("extracted");
+  const [previewMode, setPreviewMode] =
+    useState<PreviewMode>("extracted");
 
   const [historyMenu, setHistoryMenu] =
     useState<HistoryMenuState | null>(null);
@@ -1698,7 +162,12 @@ function App() {
   const availableModelNames = useMemo(() => {
     return getModelList(models)
       .map(getModelName)
-      .filter((name): name is string => Boolean(name));
+      .filter((name): name is string => Boolean(name))
+      .sort(
+        (left, right) =>
+          getModelPreferenceScore(right) - getModelPreferenceScore(left) ||
+          left.localeCompare(right),
+      );
   }, [models]);
 
   const activeModelName =
@@ -1706,10 +175,6 @@ function App() {
     availableModelNames.includes(selectedModelName)
       ? selectedModelName
       : availableModelNames[0] ?? "";
-
-  const selectedHardwareProfile =
-    hardwareProfiles.find((profile) => profile.id === hardwareProfile) ??
-    hardwareProfiles[1];
 
   const runtimeProfile = runtimeProfiles[hardwareProfile];
 
@@ -1769,6 +234,7 @@ function App() {
     () => (projectContext ? [projectContext, ...attachedFiles] : attachedFiles),
     [attachedFiles, projectContext],
   );
+  const deferredMessage = useDeferredValue(message);
 
   const selectedPreviewFile = useMemo(() => {
     if (!contextAttachments.length) {
@@ -1782,13 +248,37 @@ function App() {
     );
   }, [contextAttachments, selectedPreviewFileId]);
 
-  const pendingVisibleContent = contextAttachments.length
-    ? message.trim() || `Attached ${contextAttachments.length} file(s).`
-    : "";
+  const pendingPromptPreview = useMemo(() => {
+    if (
+      !selectedPreviewFile ||
+      !isPreviewOpen ||
+      previewMode !== "sent"
+    ) {
+      return "";
+    }
 
-  const pendingPromptPreview = selectedPreviewFile
-    ? buildPrompt(pendingVisibleContent, contextAttachments)
-    : "";
+    const visibleContent =
+      deferredMessage.trim() ||
+      `Attached ${contextAttachments.length} file(s).`;
+    const folderFiles = contextAttachments.filter(
+      (file) => file.kind === "folder",
+    );
+    const directFiles = contextAttachments.filter(
+      (file) => file.kind !== "folder",
+    );
+
+    return buildAttachmentAwarePrompt(
+      visibleContent,
+      directFiles,
+      folderFiles,
+    );
+  }, [
+    contextAttachments,
+    deferredMessage,
+    isPreviewOpen,
+    previewMode,
+    selectedPreviewFile,
+  ]);
 
   const activePreviewText = selectedPreviewFile
     ? previewMode === "sent"
@@ -1872,7 +362,14 @@ function App() {
 
   useEffect(() => {
     const saveTimer = window.setTimeout(() => {
-      localStorage.setItem(storageKey, JSON.stringify(sessions));
+      try {
+        localStorage.setItem(
+          storageKeys.sessions,
+          JSON.stringify(createPersistableSessions(sessions)),
+        );
+      } catch {
+        // A conversation remains usable in memory if browser storage is full.
+      }
     }, 250);
 
     return () => {
@@ -1883,7 +380,7 @@ function App() {
   useEffect(() => {
     const saveTimer = window.setTimeout(() => {
       localStorage.setItem(
-        attachmentStorageKey,
+        storageKeys.attachments,
         JSON.stringify(contextAttachments),
       );
     }, 250);
@@ -1917,23 +414,23 @@ function App() {
   }, [contextAttachments, isPreviewOpen, selectedPreviewFileId]);
 
   useEffect(() => {
-    localStorage.setItem(activeChatStorageKey, activeSessionId);
+    localStorage.setItem(storageKeys.activeSession, activeSessionId);
   }, [activeSessionId]);
 
   useEffect(() => {
-    localStorage.setItem(themeStorageKey, theme);
+    localStorage.setItem(storageKeys.theme, theme);
   }, [theme]);
 
   useEffect(() => {
     localStorage.setItem(
-      hardwareProfileStorageKey,
+      storageKeys.hardwareProfile,
       hardwareProfile,
     );
   }, [hardwareProfile]);
 
   useEffect(() => {
     localStorage.setItem(
-      sidebarCollapsedStorageKey,
+      storageKeys.sidebarCollapsed,
       String(isSidebarCollapsed),
     );
   }, [isSidebarCollapsed]);
@@ -1958,7 +455,7 @@ function App() {
   }, [availableModelNames, selectedModelName]);
 
   useEffect(() => {
-    localStorage.setItem(selectedModelStorageKey, activeModelName);
+    localStorage.setItem(storageKeys.selectedModel, activeModelName);
   }, [activeModelName]);
 
   useEffect(() => {
@@ -1990,7 +487,7 @@ function App() {
 
   useEffect(() => {
     localStorage.setItem(
-      ollamaEndpointStorageKey,
+      storageKeys.ollamaEndpoint,
       ollamaEndpoint,
     );
   }, [ollamaEndpoint]);
@@ -2053,7 +550,9 @@ function App() {
       maxMessageHeight,
     );
 
-    const isExpanded = nextHeight > lineHeight + verticalPadding + 12;
+    const isExpanded =
+      nextHeight >
+      composerLayout.lineHeight + composerLayout.verticalPadding + 12;
 
     textarea.style.height = `${nextHeight}px`;
 
@@ -2128,8 +627,7 @@ function App() {
       const responseLog = responseLogRef.current;
 
       if (textElement) {
-        textElement.textContent =
-          streamedTextRef.current || "Thinking...";
+        textElement.textContent = streamedTextRef.current;
       }
 
       if (responseLog && stickToBottomRef.current) {
@@ -2326,7 +824,13 @@ function App() {
 
   function editPrompt(turn: ChatTurn) {
     const files = turn.files ?? [];
-    const folder = files.find((file) => file.kind === "folder") ?? null;
+    const folderReference =
+      files.find((file) => file.kind === "folder") ?? null;
+    const folder =
+      folderReference &&
+      projectContext?.name === folderReference.name
+        ? projectContext
+        : folderReference;
     const draftFiles = files.filter((file) => file.kind !== "folder");
 
     setMessage(turn.content);
@@ -2413,7 +917,7 @@ function App() {
   }
 
   function applyEndpointSettings() {
-    const nextEndpoint = endpointDraft.trim();
+    const nextEndpoint = normalizeOllamaBaseUrl(endpointDraft);
 
     if (!nextEndpoint) {
       setEndpointDraft(ollamaEndpoint);
@@ -2444,33 +948,6 @@ function App() {
       shouldClearComposerOnSuccess,
     } = options;
 
-    const modelPrompt = buildPrompt(
-      visibleContent,
-      filesForTurn,
-    );
-    const taskMode = detectTaskMode(
-      visibleContent,
-      filesForTurn,
-    );
-    const generationOptions = buildGenerationOptions(
-      taskMode,
-      visibleContent,
-      filesForTurn,
-    );
-
-    const messages = buildMessages(
-      {
-        ...activeSession,
-        id: sessionId,
-        turns: baseTurns,
-      },
-      modelPrompt,
-      taskMode,
-      hardwareProfile,
-      visibleContent,
-      filesForTurn,
-    );
-
     const now = Date.now();
 
     const nextUserTurn: ChatTurn = {
@@ -2484,7 +961,7 @@ function App() {
     const nextAssistantTurn: ChatTurn = {
       id: assistantTurnId ?? `assistant-${now}`,
       role: "assistant",
-      content: "Thinking...",
+      content: "",
       createdAt: now,
     };
 
@@ -2521,7 +998,7 @@ function App() {
             turn.id === nextAssistantTurn.id
               ? {
                   ...turn,
-                  content: "Thinking...",
+                  content: "",
                   createdAt: turn.createdAt ?? now,
                 }
               : turn,
@@ -2538,6 +1015,37 @@ function App() {
     stickToBottomRef.current = true;
 
     let completedText = "";
+    const folderFiles = filesForTurn.filter(
+      (file) => file.kind === "folder",
+    );
+    const directFiles = filesForTurn.filter(
+      (file) => file.kind !== "folder",
+    );
+    const recentContextHistory: OllamaMessage[] = baseTurns
+      .filter(
+        (turn) =>
+          turn.content.trim() &&
+          !turn.content.startsWith("Error:"),
+      )
+      .slice(-3)
+      .map((turn) => ({
+        role: turn.role,
+        content: truncateContext(turn.content, 600),
+      }));
+    const requestSession = {
+      ...activeSession,
+      id: sessionId,
+      turns: baseTurns,
+    };
+    const directPrompt = buildPrompt(visibleContent, directFiles);
+    const chatMessages = buildMessages(
+      requestSession,
+      directPrompt,
+      hardwareProfile,
+      filesForTurn,
+      "",
+      "full",
+    );
 
     try {
       const handleToken = (token: string) => {
@@ -2545,20 +1053,53 @@ function App() {
         queueStreamPaint();
       };
       let returnedText = "";
+      let shouldUseProjectContext = false;
+      let retrievalQuery = visibleContent;
 
       try {
+        shouldUseProjectContext = folderFiles.length
+          ? await shouldReadProject(
+              directPrompt,
+              activeModelName,
+              recentContextHistory,
+            )
+          : false;
+        let requestMessages = chatMessages;
+
+        if (shouldUseProjectContext) {
+          retrievalQuery = buildProjectRetrievalQuery(
+            visibleContent,
+            recentContextHistory.slice(-2),
+          );
+
+          const modelPrompt = buildAttachmentAwarePrompt(
+            visibleContent,
+            directFiles,
+            folderFiles,
+            false,
+            retrievalQuery,
+          );
+
+          requestMessages = buildMessages(
+            requestSession,
+            modelPrompt,
+            hardwareProfile,
+            filesForTurn,
+            "",
+          );
+        }
+
         returnedText = await streamChat(
-          messages,
+          requestMessages,
           activeModelName,
           handleToken,
-          generationOptions,
+          buildGenerationOptions(
+            shouldUseProjectContext ? filesForTurn : directFiles,
+          ),
         );
       } catch (primaryError) {
         const errorMessage =
           primaryError instanceof Error ? primaryError.message : "";
-        const hasFolderContext = filesForTurn.some(
-          (file) => file.kind === "folder",
-        );
         const shouldRetry =
           errorMessage.toLowerCase().includes("empty response");
 
@@ -2569,28 +1110,26 @@ function App() {
         streamedTextRef.current = "";
         queueStreamPaint();
 
-        const compactPrompt = hasFolderContext
-          ? buildCompactPrompt(visibleContent, filesForTurn)
-          : visibleContent;
-        const compactMessages = hasFolderContext
-          ? buildMessages(
-              {
-                ...activeSession,
-                id: sessionId,
-                turns: [],
-              },
-              compactPrompt,
-              taskMode,
-              hardwareProfile,
+        const compactPrompt = shouldUseProjectContext
+          ? buildAttachmentAwarePrompt(
               visibleContent,
-              filesForTurn,
+              directFiles,
+              folderFiles,
+              true,
+              retrievalQuery,
             )
-          : [
-              {
-                role: "user" as const,
-                content: compactPrompt,
-              },
-            ];
+          : buildCompactPrompt(visibleContent, directFiles);
+        const compactBackgroundContext = shouldUseProjectContext
+          ? buildBackgroundContext(folderFiles, true, retrievalQuery)
+          : "";
+        const compactMessages = buildMessages(
+          requestSession,
+          compactPrompt,
+          hardwareProfile,
+          shouldUseProjectContext ? filesForTurn : directFiles,
+          compactBackgroundContext,
+          shouldUseProjectContext ? "full" : "none",
+        );
 
         returnedText = await streamChat(
           compactMessages,
@@ -2603,8 +1142,11 @@ function App() {
         (typeof returnedText === "string"
           ? returnedText.trim()
           : "") ||
-        streamedTextRef.current.trim() ||
-        "No response returned.";
+        streamedTextRef.current.trim();
+
+      if (!completedText) {
+        throw new Error("The local model returned no content.");
+      }
 
       shouldClearComposer = shouldClearComposerOnSuccess;
     } catch (sendError) {
@@ -2656,6 +1198,9 @@ function App() {
     );
 
     if (!trimmedMessage && !hasSendableAttachment) {
+      if (message) {
+        setMessage("");
+      }
       return;
     }
 
@@ -2700,7 +1245,12 @@ function App() {
       sessionId: activeSession.id,
       baseTurns: regenerateTarget.historyBeforeUserTurn,
       visibleContent: regenerateTarget.userTurn.content,
-      filesForTurn: regenerateTarget.userTurn.files ?? [],
+      filesForTurn: (regenerateTarget.userTurn.files ?? []).map((file) =>
+        file.kind === "folder" &&
+        projectContext?.name === file.name
+          ? projectContext
+          : file,
+      ),
       assistantTurnId: regenerateTarget.assistantTurn.id,
       shouldAppendUserTurn: false,
       shouldClearComposerOnSuccess: false,
@@ -2815,295 +1365,45 @@ function App() {
         </div>
       ) : null}
 
-      <aside
-        className={`sidebar${
-          isSidebarCollapsed ? " collapsed" : ""
-        }`}
-      >
-        <div className="sidebar-header">
-          <div className="product-brand" aria-label="Spotlight Local AI">
-            <span className="product-mark" aria-hidden="true">✦</span>
-            <span className="product-name">Spotlight</span>
-            <small>Local AI</small>
-          </div>
-
-          <div className="sidebar-header-bar">
-            <button
-              type="button"
-              className="sidebar-collapse-button"
-              onClick={() =>
-                setIsSidebarCollapsed((current) => !current)
-              }
-              aria-pressed={isSidebarCollapsed}
-              aria-label={
-                isSidebarCollapsed
-                  ? "Expand sidebar"
-                  : "Collapse sidebar"
-              }
-            >
-              <CollapseIcon
-                className={`ui-icon${
-                  isSidebarCollapsed ? " is-collapsed" : ""
-                }`}
-              />
-            </button>
-
-            <button
-              type="button"
-              className="sidebar-new-button"
-              onClick={createNewChat}
-              aria-label="Create new chat"
-            >
-              <NewChatIcon className="ui-icon" />
-            </button>
-          </div>
-
-          <h2>Recent chats</h2>
-
-          {collapsedPreviewSessions.length ? (
-            <div
-              className="sidebar-collapsed-list"
-              aria-hidden={!isSidebarCollapsed}
-            >
-              {collapsedPreviewSessions.map((session, index) => (
-                <button
-                  key={session.id}
-                  type="button"
-                  className={
-                    session.id === activeSession.id
-                      ? "sidebar-collapsed-item active"
-                      : "sidebar-collapsed-item"
-                  }
-                  onClick={() => selectSession(session.id)}
-                  aria-label={`Open recent chat ${index + 1}`}
-                >
-                  <span aria-hidden="true" />
-                </button>
-              ))}
-            </div>
-          ) : null}
-        </div>
-
-        <div
-          className="history-list"
-          role="list"
-          aria-label="Previous chat history"
-        >
-          {historySections.map((section) => (
-            <section key={section.label} className="history-group">
-              <h3 className="history-group-label">{section.label}</h3>
-
-              <div className="history-group-items">
-                {section.sessions.map((session) => (
-                  <div
-                    key={session.id}
-                    className={
-                      session.id === activeSession.id
-                        ? "history-item-shell active"
-                        : "history-item-shell"
-                    }
-                    onContextMenu={(event) => {
-                      event.preventDefault();
-
-                      openHistoryMenu(
-                        session.id,
-                        event.clientX,
-                        event.clientY,
-                      );
-                    }}
-                  >
-                    {editingSessionId === session.id &&
-                    session.id !== activeSession.id ? (
-                      <input
-                        className="history-rename-input"
-                        value={draftTitle}
-                        autoFocus
-                        onPointerDown={(event) =>
-                          event.stopPropagation()
-                        }
-                        onChange={(event) =>
-                          setDraftTitle(
-                            event.currentTarget.value,
-                          )
-                        }
-                        onBlur={commitRename}
-                        onKeyDown={(event) => {
-                          if (event.key === "Enter") {
-                            event.currentTarget.blur();
-                          }
-
-                          if (event.key === "Escape") {
-                            setEditingSessionId(null);
-                          }
-                        }}
-                      />
-                    ) : (
-                      <button
-                        type="button"
-                        className="history-item"
-                        onClick={() =>
-                          selectSession(session.id)
-                        }
-                        onDoubleClick={() =>
-                          startRename(session.id)
-                        }
-                        aria-pressed={
-                          session.id === activeSession.id
-                        }
-                      >
-                        <span className="history-item-title">
-                          {session.title}
-                        </span>
-                      </button>
-                    )}
-
-                    <button
-                      type="button"
-                      className="history-options-button"
-                      aria-label={`More options for ${session.title}`}
-                      onClick={(event) => {
-                        event.stopPropagation();
-
-                        const rect =
-                          event.currentTarget.getBoundingClientRect();
-
-                        openHistoryMenu(
-                          session.id,
-                          rect.right - 164,
-                          rect.bottom + 6,
-                        );
-                      }}
-                    >
-                      <MoreIcon className="ui-icon" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            </section>
-          ))}
-        </div>
-
-        <div className="sidebar-footer">
-          <button
-            type="button"
-            className="sidebar-settings-button"
-            aria-pressed={isSettingsOpen}
-            aria-label={isSettingsOpen ? "Open chat" : "Open settings"}
-            onClick={() =>
-              setIsSettingsOpen((current) => !current)
-            }
-          >
-            <SettingsIcon className="ui-icon" />
-            <span>{isSettingsOpen ? "Back to chat" : "Settings"}</span>
-          </button>
-        </div>
-      </aside>
-
-      {historyMenu ? (
-        <div
-          className="history-menu"
-          style={{
-            left: historyMenu.x,
-            top: historyMenu.y,
-          }}
-          role="menu"
-          onPointerDown={(event) =>
-            event.stopPropagation()
-          }
-        >
-          <button
-            type="button"
-            className="history-menu-item"
-            onClick={() =>
-              startRename(historyMenu.sessionId)
-            }
-          >
-            Rename
-          </button>
-
-          <button
-            type="button"
-            className="history-menu-item"
-            onClick={() =>
-              duplicateSession(historyMenu.sessionId)
-            }
-          >
-            Duplicate
-          </button>
-
-          <button
-            type="button"
-            className="history-menu-item danger"
-            onClick={() =>
-              deleteSession(historyMenu.sessionId)
-            }
-          >
-            Delete
-          </button>
-        </div>
-      ) : null}
+      <Sidebar
+        activeSessionId={activeSession.id}
+        collapsedPreviewSessions={collapsedPreviewSessions}
+        draftTitle={draftTitle}
+        editingSessionId={editingSessionId}
+        historyMenu={historyMenu}
+        historySections={historySections}
+        isCollapsed={isSidebarCollapsed}
+        isSettingsOpen={isSettingsOpen}
+        onCancelRename={() => setEditingSessionId(null)}
+        onCollapseChange={setIsSidebarCollapsed}
+        onCommitRename={commitRename}
+        onCreateChat={createNewChat}
+        onDeleteSession={deleteSession}
+        onDraftTitleChange={setDraftTitle}
+        onDuplicateSession={duplicateSession}
+        onOpenHistoryMenu={openHistoryMenu}
+        onSelectSession={selectSession}
+        onStartRename={startRename}
+        onToggleSettings={() =>
+          setIsSettingsOpen((current) => !current)
+        }
+      />
 
       <section className="workspace">
         <header className="workspace-header">
           <div className="header-actions">
             <div className="header-toolbar">
-              <div className="model-select-shell">
-                <span className="model-local-status" aria-label="Local model">
-                  <i aria-hidden="true" />
-                </span>
-
-                <button
-                  type="button"
-                  className="model-select-trigger"
-                  aria-label="Select model"
-                  aria-haspopup="listbox"
-                  aria-expanded={isModelMenuOpen}
-                  title={activeModelName || "No models found"}
-                  disabled={!availableModelNames.length || isGenerating}
-                  onClick={() =>
-                    setIsModelMenuOpen((current) => !current)
-                  }
-                >
-                  <span className="model-select-value">
-                    {activeModelName
-                      ? getModelDisplayName(activeModelName)
-                      : "No models found"}
-                  </span>
-                </button>
-
-                {isModelMenuOpen && availableModelNames.length ? (
-                  <div
-                    className="model-select-menu"
-                    role="listbox"
-                    aria-label="Available models"
-                    onPointerDown={(event) =>
-                      event.stopPropagation()
-                    }
-                  >
-                    {availableModelNames.map((modelName) => (
-                      <button
-                        key={modelName}
-                        type="button"
-                        role="option"
-                        aria-selected={modelName === activeModelName}
-                        className={`model-select-option${
-                          modelName === activeModelName
-                            ? " active"
-                            : ""
-                        }`}
-                        onClick={() => {
-                          setSelectedModelName(modelName);
-                          setIsModelMenuOpen(false);
-                        }}
-                      >
-                        <span>{getModelDisplayName(modelName)}</span>
-                        <small>{modelName}</small>
-                      </button>
-                    ))}
-                  </div>
-                ) : null}
-              </div>
-
+              <ModelSelector
+                activeModelName={activeModelName}
+                availableModelNames={availableModelNames}
+                isGenerating={isGenerating}
+                isOpen={isModelMenuOpen}
+                onOpenChange={setIsModelMenuOpen}
+                onSelect={(modelName) => {
+                  setSelectedModelName(modelName);
+                  setIsModelMenuOpen(false);
+                }}
+              />
             </div>
           </div>
 
@@ -3150,140 +1450,24 @@ function App() {
         </header>
 
         {isSettingsOpen ? (
-          <section className="card settings-card">
-            <div className="settings-header">
-              <div>
-                <h3>Settings</h3>
-                <p>
-                  Configure the local model connection and choose the device profile for this app.
-                </p>
-              </div>
-
-              <button
-                type="button"
-                className="settings-close-button"
-                onClick={() => setIsSettingsOpen(false)}
-              >
-                Back to chat
-              </button>
-            </div>
-
-            <div className="settings-grid">
-              <section className="settings-panel">
-                <div className="settings-panel-header">
-                  <h4>Local AI</h4>
-                  <p>{setupStatusLabel}</p>
-                </div>
-
-                <label className="settings-field">
-                  <span>Ollama endpoint</span>
-                  <div className="settings-input-row">
-                    <input
-                      className="settings-input"
-                      type="text"
-                      value={endpointDraft}
-                      onChange={(event) =>
-                        setEndpointDraft(event.currentTarget.value)
-                      }
-                      placeholder="http://127.0.0.1:11434"
-                    />
-
-                    <button
-                      type="button"
-                      className="settings-apply-button"
-                      onClick={applyEndpointSettings}
-                    >
-                      Apply
-                    </button>
-                  </div>
-                </label>
-
-                <label className="settings-field">
-                  <span>Model</span>
-                  <select
-                    className="settings-select"
-                    value={activeModelName}
-                    disabled={!availableModelNames.length || isGenerating}
-                    onChange={(event) =>
-                      setSelectedModelName(event.currentTarget.value)
-                    }
-                  >
-                    {availableModelNames.length ? (
-                      availableModelNames.map((modelName) => (
-                        <option key={modelName} value={modelName}>
-                          {modelName}
-                        </option>
-                      ))
-                    ) : (
-                      <option value="">No models found</option>
-                    )}
-                  </select>
-                </label>
-
-                <div className="settings-actions">
-                  <button
-                    type="button"
-                    className="settings-secondary-button"
-                    onClick={() => {
-                      void refreshModels();
-                    }}
-                  >
-                    Retry connection
-                  </button>
-
-                  <p className="settings-note">
-                    Local processing stays on this device unless you add online features later.
-                  </p>
-                </div>
-              </section>
-
-              <section className="settings-panel">
-                <div className="settings-panel-header">
-                  <h4>Device profile</h4>
-                  <p>
-                    Each profile changes how much file content and chat history are sent to the local model.
-                  </p>
-                </div>
-
-                <div className="settings-profile-list" role="radiogroup" aria-label="Hardware profile">
-                  {hardwareProfiles.map((profile) => (
-                    <button
-                      key={profile.id}
-                      type="button"
-                      className={`settings-profile-card${profile.id === hardwareProfile ? " active" : ""}`}
-                      aria-pressed={profile.id === hardwareProfile}
-                      onClick={() => setHardwareProfile(profile.id)}
-                    >
-                      <strong>{profile.label}</strong>
-                      <span>{profile.description}</span>
-                    </button>
-                  ))}
-                </div>
-
-                <label className="settings-field">
-                  <span>Theme</span>
-                  <select
-                    className="settings-select"
-                    value={theme}
-                    onChange={(event) =>
-                      setTheme(event.currentTarget.value as Theme)
-                    }
-                  >
-                    <option value="dark">Dark</option>
-                    <option value="light">Light</option>
-                  </select>
-                </label>
-
-                <div className="settings-summary">
-                  <strong>{selectedHardwareProfile.label}</strong>
-                  <span>{selectedHardwareProfile.description}</span>
-                  <small>
-                    Sends up to {runtimeProfile.previewCharacters.toLocaleString()} file characters and {runtimeProfile.recentMessageCount} recent messages. Response style is selected automatically by task.
-                  </small>
-                </div>
-              </section>
-            </div>
-          </section>
+          <SettingsPanel
+            activeModelName={activeModelName}
+            availableModelNames={availableModelNames}
+            endpointDraft={endpointDraft}
+            hardwareProfile={hardwareProfile}
+            isGenerating={isGenerating}
+            setupStatusLabel={setupStatusLabel}
+            theme={theme}
+            onApplyEndpoint={applyEndpointSettings}
+            onClose={() => setIsSettingsOpen(false)}
+            onEndpointChange={setEndpointDraft}
+            onHardwareProfileChange={setHardwareProfile}
+            onModelChange={setSelectedModelName}
+            onRefreshModels={() => {
+              void refreshModels();
+            }}
+            onThemeChange={setTheme}
+          />
         ) : (
         <section className="card chat-canvas">
           {activeSession.turns.length === 0 ? (
@@ -3293,16 +1477,6 @@ function App() {
 
               <p>{emptyStateContent.description}</p>
 
-              {!hasDraftMessage && !attachedFiles.length ? (
-                <div className="canvas-starter-actions" aria-label="Starter prompts">
-                  <button type="button" onClick={() => editPrompt({ id: "starter", role: "user", content: "Help me plan my next task." })}>
-                    Plan a task
-                  </button>
-                  <button type="button" onClick={() => editPrompt({ id: "starter", role: "user", content: "Summarize the file I attached." })}>
-                    Summarize a file
-                  </button>
-                </div>
-              ) : null}
             </div>
           ) : (
             <div className="active-chat-heading">
@@ -3349,290 +1523,39 @@ function App() {
           )}
 
           {selectedPreviewFile ? (
-            <section
-              className={`file-preview-panel${
-                isPreviewOpen ? " open" : ""
-              }`}
-              aria-label="Attached file preview"
-            >
-              <div className="file-preview-header">
-                <button
-                  type="button"
-                  className="file-preview-toggle"
-                  aria-expanded={isPreviewOpen}
-                  onClick={() =>
-                    setIsPreviewOpen((current) => !current)
-                  }
-                >
-                  <span className="file-preview-toggle-copy">
-                    <small>{selectedPreviewFile.name}</small>
-                  </span>
-
-                  <span className="file-preview-toggle-action">
-                    {isPreviewOpen ? "Hide preview" : "Preview"}
-                  </span>
-                </button>
-
-                {selectedPreviewFile.kind === "folder" ? (
-                  <button
-                    type="button"
-                    className="file-preview-detach"
-                    onClick={() => removeFile(selectedPreviewFile.id)}
-                  >
-                    Detach
-                  </button>
-                ) : null}
-              </div>
-
-              {isPreviewOpen ? (
-                <>
-                  {contextAttachments.length > 1 ? (
-                    <div
-                      className="file-preview-tabs"
-                      role="tablist"
-                      aria-label="Attached files"
-                    >
-                      {contextAttachments.map((file) => (
-                        <button
-                          key={file.id}
-                          type="button"
-                          role="tab"
-                          aria-selected={file.id === selectedPreviewFile.id}
-                          className={`file-preview-tab${
-                            file.id === selectedPreviewFile.id
-                              ? " active"
-                              : ""
-                          }`}
-                          onClick={() =>
-                            setSelectedPreviewFileId(file.id)
-                          }
-                        >
-                          <strong>{file.name}</strong>
-                          <span>{file.sizeLabel}</span>
-                        </button>
-                      ))}
-                    </div>
-                  ) : null}
-
-                  {selectedPreviewFile.folderStats ? (
-                    <div className="folder-scan-summary">
-                      <span>
-                        Attached folder:{" "}
-                        <strong>
-                          {selectedPreviewFile.folderStats.rootName}
-                        </strong>
-                      </span>
-                      <span>
-                        {selectedPreviewFile.folderStats.filesFound} files found
-                      </span>
-                      <span>
-                        {selectedPreviewFile.folderStats.filesIncluded} included
-                      </span>
-                      <span>
-                        {selectedPreviewFile.folderStats.filesIgnored} ignored
-                      </span>
-                      <span>
-                        {selectedPreviewFile.folderStats.filesSkipped} skipped
-                      </span>
-                    </div>
-                  ) : null}
-
-                  <div className="file-preview-toolbar">
-                    <div
-                      className="file-preview-mode-switch"
-                      role="tablist"
-                      aria-label="Preview mode"
-                    >
-                      <button
-                        type="button"
-                        role="tab"
-                        aria-selected={previewMode === "extracted"}
-                        className={`file-preview-mode-button${
-                          previewMode === "extracted"
-                            ? " active"
-                            : ""
-                        }`}
-                        onClick={() => setPreviewMode("extracted")}
-                      >
-                        Extracted
-                      </button>
-
-                      <button
-                        type="button"
-                        role="tab"
-                        aria-selected={previewMode === "sent"}
-                        className={`file-preview-mode-button${
-                          previewMode === "sent"
-                            ? " active"
-                            : ""
-                        }`}
-                        onClick={() => setPreviewMode("sent")}
-                      >
-                        Sent to model
-                      </button>
-                    </div>
-
-                    <span className="file-preview-status">
-                      {previewMode === "sent"
-                        ? "Current draft plus attached file context"
-                        : selectedPreviewFile.kind === "folder"
-                          ? "Ready for local project questions"
-                          : selectedPreviewFile.supported
-                          ? "Ready for local analysis"
-                          : "Preview unavailable for this file type"}
-                    </span>
-                  </div>
-
-                  <pre
-                    className={`file-preview-text${
-                      previewMode === "sent"
-                        ? " prompt-preview-text"
-                        : ""
-                    }`}
-                  >
-                    {activePreviewText}
-                  </pre>
-                </>
-              ) : null}
-            </section>
+            <FilePreview
+              activePreviewText={activePreviewText}
+              attachments={contextAttachments}
+              isOpen={isPreviewOpen}
+              previewMode={previewMode}
+              selectedFile={selectedPreviewFile}
+              onDetach={removeFile}
+              onOpenChange={setIsPreviewOpen}
+              onPreviewModeChange={setPreviewMode}
+              onSelectFile={setSelectedPreviewFileId}
+            />
           ) : null}
 
-          <div className="response-panel">
-            {isGenerating ? (
-              <div className="response-loading-banner">
-                <span className="loading-indicator" aria-live="polite">
-                  Generating response…
-                </span>
-              </div>
-            ) : null}
-
-            <div
-              ref={responseLogRef}
-              className="response-log"
-              onScroll={handleResponseScroll}
-            >
-              {activeSession.turns.length ? (
-                activeSession.turns.map((turn) => {
-                  const isStreamingTurn =
-                    turn.id === streamingTurnId;
-                  const canRegenerateTurn =
-                    turn.role === "assistant" &&
-                    regenerateTarget?.assistantTurn.id === turn.id;
-
-                  return (
-                    <div
-                      key={turn.id}
-                      className={`turn-row turn-row-${turn.role}`}
-                    >
-                      <div
-                        className={`turn turn-${turn.role}${
-                          isStreamingTurn ? " streaming" : ""
-                        }`}
-                      >
-                        {turn.files?.length ? (
-                          <div className="message-attachments">
-                            {turn.files.map((file) => (
-                              <div
-                                key={file.id}
-                                className="message-attachment"
-                              >
-                                <strong>
-                                  {file.name}
-                                </strong>
-
-                                <span>
-                                  {file.typeLabel} ·{" "}
-                                  {file.sizeLabel}
-                                </span>
-                              </div>
-                            ))}
-                          </div>
-                        ) : null}
-
-                        {isStreamingTurn ? (
-                          <p ref={streamingTextElementRef}>
-                            {turn.content}
-                          </p>
-                        ) : (
-                          <div className="message-markdown">
-                            {renderMarkdown(turn.content)}
-                          </div>
-                        )}
-
-                        {turn.role === "assistant" ? (
-                          <div className="turn-actions turn-actions-assistant">
-                            <button
-                              type="button"
-                              className="turn-action-button"
-                              aria-label="Copy response"
-                              title="Copy response"
-                              onClick={() => void copyResponse(turn.content)}
-                            >
-                              <CopyIcon className="turn-action-icon" />
-                            </button>
-
-                            <button
-                              type="button"
-                              className="turn-action-button"
-                              aria-label="Download response as Markdown"
-                              title="Download response as Markdown"
-                              onClick={() => downloadResponse(turn.content)}
-                            >
-                              <DownloadIcon className="turn-action-icon" />
-                            </button>
-
-                            {canRegenerateTurn ? (
-                              <button
-                                type="button"
-                                className="turn-action-button"
-                                aria-label="Regenerate response"
-                                title="Regenerate response"
-                                disabled={isGenerating || !activeModelName}
-                                onClick={() => {
-                                  void regenerateLastResponse();
-                                }}
-                              >
-                                <RegenerateIcon className="turn-action-icon" />
-                              </button>
-                            ) : null}
-                          </div>
-                        ) : (
-                          <div className="turn-actions turn-actions-user">
-                            <button
-                              type="button"
-                              className="turn-action-button"
-                              aria-label="Edit prompt"
-                              title="Edit prompt"
-                              disabled={isGenerating}
-                              onClick={() => editPrompt(turn)}
-                            >
-                              <EditIcon className="turn-action-icon" />
-                            </button>
-                          </div>
-                        )}
-                      </div>
-
-                      <time
-                        className="turn-timestamp"
-                        dateTime={
-                          turn.createdAt
-                            ? new Date(turn.createdAt).toISOString()
-                            : undefined
-                        }
-                      >
-                        {formatLocalTime(turn.createdAt)}
-                      </time>
-                    </div>
-                  );
-                })
-              ) : (
-                <p className="response-empty">
-                  Your first message will create a local
-                  response.
-                </p>
-              )}
-            </div>
-          </div>
+          <ConversationLog
+            activeModelName={activeModelName}
+            canRegenerateAssistantTurnId={
+              regenerateTarget?.assistantTurn.id
+            }
+            isGenerating={isGenerating}
+            responseLogRef={responseLogRef}
+            session={activeSession}
+            streamingTextElementRef={streamingTextElementRef}
+            streamingTurnId={streamingTurnId}
+            onCopyResponse={(content) => {
+              void copyResponse(content);
+            }}
+            onDownloadResponse={downloadResponse}
+            onEditPrompt={editPrompt}
+            onRegenerate={() => {
+              void regenerateLastResponse();
+            }}
+            onScroll={handleResponseScroll}
+          />
 
           <MessageComposer
             attachedFiles={attachedFiles}

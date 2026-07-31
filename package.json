@@ -1,11 +1,15 @@
 {
-  "name": "tauri-app",
+  "name": "desktop-spotlight-ai",
   "private": true,
   "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "qa:product": "node --no-warnings --experimental-strip-types qa/product-validation.mts",
+    "qa:v0.1": "node --no-warnings --experimental-strip-types qa/product-validation.mts --mode=v0.1",
+    "qa:v0.2": "node --no-warnings --experimental-strip-types qa/product-validation.mts --mode=v0.2",
+    "qa:responses": "node --no-warnings --experimental-strip-types qa/response-quality.mts",
     "preview": "vite preview",
     "tauri": "tauri"
   },
@@ -13,7 +17,7 @@
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
     "@tauri-apps/api": "^2",
-    "@tauri-apps/plugin-opener": "^2"
+    "@tauri-apps/plugin-http": "^2"
   },
   "devDependencies": {
     "@types/react": "^19.1.8",

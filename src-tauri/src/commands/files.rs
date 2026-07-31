@@ -9,8 +9,8 @@ use tauri_plugin_dialog::DialogExt;
 
 const MAX_FILE_SIZE: u64 = 200 * 1024;
 const MAX_INCLUDED_FILES: usize = 30;
-const MAX_CONTEXT_CHARACTERS: usize = 12_000;
-const MAX_FILE_CONTEXT_CHARACTERS: usize = 1_800;
+const MAX_CONTEXT_CHARACTERS: usize = 400_000;
+const MAX_FILE_CONTEXT_CHARACTERS: usize = 200_000;
 const MAX_TREE_ENTRIES: usize = 80;
 
 #[derive(Serialize)]
@@ -230,9 +230,10 @@ fn scan_directory(
             }
         };
         let remaining_characters = MAX_CONTEXT_CHARACTERS - *total_characters;
-        let contents = truncate_to_characters(
+        let contents = create_project_file_excerpt(
             &contents,
             remaining_characters.min(MAX_FILE_CONTEXT_CHARACTERS),
+            &relative_path,
         );
 
         *total_characters += contents.chars().count();
@@ -283,6 +284,7 @@ fn is_ignored_file(path: &Path) -> bool {
         file_name.as_str(),
         ".ds_store"
             | ".env"
+            | ".gitignore"
             | "package-lock.json"
             | "pnpm-lock.yaml"
             | "yarn.lock"
@@ -328,7 +330,8 @@ fn ignored_directory_names() -> HashSet<String> {
 
 fn supported_extensions() -> HashSet<String> {
     [
-        ".md", ".txt", ".json", ".ts", ".tsx", ".js", ".jsx", ".css", ".html", ".rs", ".toml",
+        ".md", ".txt", ".json", ".ts", ".tsx", ".js", ".jsx", ".css", ".html", ".py", ".pyi",
+        ".rs", ".toml", ".yaml", ".yml",
     ]
     .into_iter()
     .map(String::from)
@@ -336,7 +339,14 @@ fn supported_extensions() -> HashSet<String> {
 }
 
 fn supported_file_names() -> HashSet<String> {
-    [".env.example", ".gitignore", "package.json", "readme.md"]
+    [
+        ".env.example",
+        "dockerfile",
+        "makefile",
+        "package.json",
+        "requirements.txt",
+        "readme.md",
+    ]
         .into_iter()
         .map(String::from)
         .collect()
@@ -348,6 +358,10 @@ fn get_project_file_priority(path: &str) -> usize {
         .rsplit('/')
         .next()
         .unwrap_or(normalized_path.as_str());
+    let extension = Path::new(base_name)
+        .extension()
+        .and_then(|value| value.to_str())
+        .unwrap_or("");
 
     if base_name == "readme.md" {
         return 0;
@@ -357,36 +371,57 @@ fn get_project_file_priority(path: &str) -> usize {
         return 1;
     }
 
-    if normalized_path.ends_with("src/app.tsx") {
+    if base_name == "pyproject.toml" || base_name == "requirements.txt" {
         return 2;
     }
 
-    if normalized_path.ends_with("src/services/ollama.tsx") {
+    if normalized_path.ends_with("src/app.tsx")
+        || normalized_path.ends_with("src/app.ts")
+        || normalized_path.ends_with("src/app.jsx")
+        || normalized_path.ends_with("src/app.js")
+    {
         return 3;
     }
 
-    if normalized_path.ends_with("src/services/contextbuilder.ts") {
+    if normalized_path.ends_with("src/app.css")
+        || normalized_path.ends_with("src/index.css")
+        || normalized_path.ends_with("src/main.css")
+    {
         return 4;
     }
 
-    if normalized_path.ends_with("src/app.css") {
+    if normalized_path.ends_with("src/main.tsx")
+        || normalized_path.ends_with("src/main.ts")
+        || normalized_path.ends_with("src/main.jsx")
+        || normalized_path.ends_with("src/main.js")
+        || normalized_path.ends_with("src/index.tsx")
+        || normalized_path.ends_with("src/index.ts")
+        || normalized_path.ends_with("src/index.jsx")
+        || normalized_path.ends_with("src/index.js")
+    {
         return 5;
     }
 
-    if normalized_path.ends_with("src-tauri/src/lib.rs") {
-        return 6;
+    if normalized_path.contains("/src/components/") {
+        return 10;
     }
 
-    if normalized_path.ends_with("src-tauri/src/commands/files.rs") {
-        return 7;
+    if normalized_path.contains("/src/services/") {
+        return 12;
     }
 
-    if normalized_path.ends_with("src-tauri/tauri.conf.json") {
-        return 8;
+    if normalized_path.contains("/src/")
+        && matches!(extension, "ts" | "tsx" | "js" | "jsx" | "css")
+    {
+        return 15;
     }
 
-    if normalized_path.contains("/src/") {
+    if normalized_path.contains("/backend/") {
         return 20;
+    }
+
+    if normalized_path.contains("/src-tauri/src/") {
+        return 25;
     }
 
     if normalized_path.contains("/src-tauri/") {
@@ -426,17 +461,351 @@ fn clean_text(text: &str) -> String {
     output.trim().to_string()
 }
 
-fn truncate_to_characters(text: &str, max_characters: usize) -> String {
-    if text.chars().count() <= max_characters {
-        return text.to_string();
+fn extract_css_blocks(text: &str) -> Vec<String> {
+    let characters = text.char_indices().collect::<Vec<_>>();
+    let mut blocks = Vec::new();
+    let mut block_start = 0usize;
+    let mut depth = 0usize;
+
+    for (index, character) in characters {
+        if character == '{' {
+            depth += 1;
+        } else if character == '}' {
+            depth = depth.saturating_sub(1);
+
+            if depth == 0 {
+                let block_end = index + character.len_utf8();
+                let block = text[block_start..block_end].trim();
+                if !block.is_empty() {
+                    blocks.push(block.to_string());
+                }
+                block_start = block_end;
+            }
+        }
     }
 
-    let mut truncated = text.chars().take(max_characters).collect::<String>();
-    truncated.push_str(&format!(
-        "\n\n[Context truncated at {} characters]",
-        max_characters
-    ));
-    truncated
+    blocks
+}
+
+fn sample_evenly(items: &[String], maximum: usize) -> Vec<&str> {
+    let sample_count = items.len().min(maximum);
+
+    (0..sample_count)
+        .filter_map(|index| {
+            let item_index = if sample_count <= 1 {
+                0
+            } else {
+                index * (items.len() - 1) / (sample_count - 1)
+            };
+
+            items.get(item_index).map(String::as_str)
+        })
+        .collect()
+}
+
+fn build_css_index(text: &str) -> String {
+    let entries = extract_css_blocks(text)
+        .into_iter()
+        .filter_map(|block| {
+            let (selector, body) = block.split_once('{')?;
+            let selector = selector
+                .lines()
+                .filter(|line| !line.trim().starts_with("/*"))
+                .collect::<Vec<_>>()
+                .join(" ")
+                .split_whitespace()
+                .collect::<Vec<_>>()
+                .join(" ");
+
+            if selector.is_empty() || selector.starts_with('@') {
+                return None;
+            }
+
+            let declaration = body
+                .split(';')
+                .find_map(|part| {
+                    let (property, value) = part.split_once(':')?;
+                    let property = property.trim();
+                    let value = value.trim();
+
+                    (!property.is_empty()
+                        && !value.is_empty()
+                        && property
+                            .chars()
+                            .all(|character| character.is_ascii_alphanumeric() || character == '-'))
+                    .then(|| format!("{property}: {value}"))
+                })?;
+
+            Some(format!("{selector} -> {declaration}"))
+        })
+        .collect::<Vec<_>>();
+    let sampled = sample_evenly(&entries, 40);
+
+    if sampled.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "[CSS selector index extracted from complete blocks]\n{}",
+            sampled.join("\n")
+        )
+    }
+}
+
+fn extract_source_windows(text: &str, signal_terms: &[&str]) -> Vec<String> {
+    let lines = text.lines().collect::<Vec<_>>();
+    let signal_indexes = lines
+        .iter()
+        .enumerate()
+        .filter_map(|(index, line)| {
+            let normalized = line.to_lowercase();
+
+            signal_terms
+                .iter()
+                .any(|term| normalized.contains(term))
+                .then_some(index)
+        })
+        .map(|index| index.to_string())
+        .collect::<Vec<_>>();
+
+    sample_evenly(&signal_indexes, 14)
+        .iter()
+        .filter_map(|value| value.parse::<usize>().ok())
+        .map(|index| {
+            let start = index.saturating_sub(2);
+            let end = (index + 4).min(lines.len());
+
+            lines[start..end].join("\n").trim().to_string()
+        })
+        .collect()
+}
+
+fn build_source_index(text: &str, path: &str) -> String {
+    if path.to_lowercase().ends_with(".css") {
+        return build_css_index(text);
+    }
+
+    let mut callables = Vec::<(usize, String)>::new();
+    let mut constant_declarations = Vec::<String>::new();
+    let mut ui_labels = Vec::<String>::new();
+    let lines = text.lines().collect::<Vec<_>>();
+    let mut offset = 0usize;
+
+    for line in &lines {
+        let trimmed = line.trim();
+        for marker in ["aria-label=\"", "placeholder=\""] {
+            if let Some(start) = trimmed.find(marker) {
+                let value_start = start + marker.len();
+                if let Some(end) = trimmed[value_start..].find('"') {
+                    let label = trimmed[value_start..value_start + end].trim();
+                    if !label.is_empty() && !ui_labels.iter().any(|item| item == label) {
+                        ui_labels.push(label.to_string());
+                    }
+                }
+            }
+        }
+        let callable = trimmed
+            .strip_prefix("function ")
+            .or_else(|| trimmed.strip_prefix("fn "))
+            .and_then(|rest| {
+                rest.split(|character: char| {
+                    !(character.is_ascii_alphanumeric() || character == '_')
+                })
+                .next()
+            })
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .or_else(|| {
+                let rest = trimmed.strip_prefix("const ")?;
+                let (name, value) = rest.split_once('=')?;
+                let value = value.trim_start();
+                (value.starts_with("useCallback(")
+                    || value.starts_with("async (")
+                    || value.starts_with('('))
+                .then(|| name.trim().to_string())
+            });
+
+        if let Some(name) = callable {
+            callables.push((offset, name));
+        }
+
+        if let Some(rest) = trimmed.strip_prefix("const ") {
+            if let Some((declaration, _)) = trimmed.split_once(';') {
+                let name = rest
+                    .split(|character: char| {
+                        character == ':' || character == '=' || character.is_whitespace()
+                    })
+                    .next()
+                    .unwrap_or_default();
+                if !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|character| {
+                            character.is_ascii_uppercase()
+                                || character.is_ascii_digit()
+                                || character == '_'
+                        })
+                {
+                    constant_declarations.push(format!("{declaration};"));
+                }
+            }
+        }
+
+        offset += line.len() + 1;
+    }
+
+    let mut endpoints = Vec::new();
+    for (index, _) in text.match_indices("/api/") {
+        let endpoint = text[index..]
+            .chars()
+            .take_while(|character| {
+                character.is_ascii_alphanumeric()
+                    || matches!(character, '/' | '_' | '.' | '-' | ':' | '{' | '}')
+            })
+            .collect::<String>();
+        let owner = callables
+            .iter()
+            .rev()
+            .find(|(callable_index, _)| *callable_index < index)
+            .map(|(_, name)| name.as_str())
+            .unwrap_or("file scope");
+        let location = format!("{owner} -> {endpoint}");
+
+        if !endpoints.contains(&location) {
+            endpoints.push(location);
+        }
+    }
+
+    let mut callable_names = Vec::new();
+    for (_, name) in callables {
+        if !callable_names.contains(&name) {
+            callable_names.push(name);
+        }
+    }
+
+    if callable_names.is_empty()
+        && constant_declarations.is_empty()
+        && endpoints.is_empty()
+        && ui_labels.is_empty()
+    {
+        return String::new();
+    }
+
+    let mut lines = vec!["[Source index extracted from the complete file]".to_string()];
+    if !constant_declarations.is_empty() {
+        lines.push(format!(
+            "Verbatim constant declarations: {}",
+            constant_declarations.join(" ")
+        ));
+    }
+    if !callable_names.is_empty() {
+        lines.push(format!("Named callables: {}", callable_names.join(", ")));
+    }
+    if !endpoints.is_empty() {
+        lines.push(format!(
+            "API paths by nearest callable: {}",
+            endpoints.join("; ")
+        ));
+    }
+    if !ui_labels.is_empty() {
+        lines.push(format!(
+            "Static UI labels: {}",
+            ui_labels.into_iter().take(30).collect::<Vec<_>>().join(", ")
+        ));
+    }
+
+    lines.join("\n")
+}
+
+fn create_project_file_excerpt(text: &str, max_characters: usize, path: &str) -> String {
+    let source_index = build_source_index(text, path);
+    let index_prefix = if source_index.is_empty() {
+        String::new()
+    } else {
+        format!("{source_index}\n\n")
+    };
+    let prefix_characters = index_prefix.chars().count();
+    let content_limit = max_characters.saturating_sub(prefix_characters);
+
+    if text.chars().count() <= content_limit {
+        return format!("{index_prefix}{text}");
+    }
+
+    const MARKER_BUDGET: usize = 120;
+    let available_characters = content_limit.saturating_sub(MARKER_BUDGET);
+    let head_budget = available_characters * 2 / 10;
+    let signal_budget = available_characters * 6 / 10;
+    let tail_budget = available_characters - head_budget - signal_budget;
+    let is_css = path.to_lowercase().ends_with(".css");
+    let source_signal_terms = [
+        "import ",
+        "export ",
+        "type ",
+        "interface ",
+        "class ",
+        "function ",
+        "const ",
+        "return (",
+        "usestate(",
+        "useeffect(",
+        "usememo(",
+        "usecallback(",
+        "createcontext(",
+        "fetch(",
+        "invoke(",
+        "onclick=",
+        "onchange=",
+        "onsubmit=",
+        "aria-label=",
+        "placeholder=",
+        "classname=",
+    ];
+    let css_blocks = if is_css {
+        extract_css_blocks(text)
+    } else {
+        Vec::new()
+    };
+    let source_windows = if is_css {
+        Vec::new()
+    } else {
+        extract_source_windows(text, &source_signal_terms)
+    };
+    let sampled_signals = if is_css {
+        sample_evenly(&css_blocks, 36).join("\n\n")
+    } else {
+        source_windows.join("\n\n")
+    };
+    let head = text.chars().take(head_budget).collect::<String>();
+    let signals = sampled_signals
+        .chars()
+        .take(signal_budget)
+        .collect::<String>();
+    let tail = text
+        .chars()
+        .rev()
+        .take(tail_budget)
+        .collect::<String>()
+        .chars()
+        .rev()
+        .collect::<String>();
+
+    let excerpt = [
+        "[Beginning of file]",
+        &head,
+        if is_css {
+            "[Complete style blocks sampled across the file]"
+        } else {
+            "[Behavior and interface signals sampled across the file]"
+        },
+        &signals,
+        "[End of file]",
+        &tail,
+    ]
+    .join("\n\n");
+
+    format!("{index_prefix}{excerpt}")
+        .chars()
+        .take(max_characters)
+        .collect()
 }
 
 fn format_file_tree(paths: &[String], root_name: &str) -> String {

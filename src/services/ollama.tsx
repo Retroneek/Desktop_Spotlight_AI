@@ -1,4 +1,11 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { isTauri } from "@tauri-apps/api/core";
+import { fetch as tauriFetch } from "@tauri-apps/plugin-http";
+import {
+  projectRoutingProtocol,
+  resolveProjectRoutingDecision,
+} from "./chatProtocol";
+import { normalizeOllamaBaseUrl } from "./endpoint";
 
 const DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
 
@@ -38,11 +45,38 @@ type ChatStreamChunk = {
   };
   response?: string;
   done?: boolean;
+  done_reason?: string;
   error?: string;
+};
+
+type ChatResponse = {
+  message?: {
+    content?: string;
+  };
 };
 
 function getErrorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Unknown Ollama error.";
+}
+
+function ollamaFetch(input: string, init?: RequestInit) {
+  if (!isTauri()) {
+    const browserHeaders = new Headers(init?.headers);
+    browserHeaders.delete("Origin");
+
+    return window.fetch(input, {
+      ...init,
+      headers: browserHeaders,
+    });
+  }
+
+  const nativeHeaders = new Headers(init?.headers);
+  nativeHeaders.set("Origin", "");
+
+  return tauriFetch(input, {
+    ...init,
+    headers: nativeHeaders,
+  });
 }
 
 async function readOllamaError(response: Response) {
@@ -61,6 +95,8 @@ async function readOllamaError(response: Response) {
 }
 
 export function useOllama(baseUrl = DEFAULT_OLLAMA_BASE_URL) {
+  const normalizedBaseUrl =
+    normalizeOllamaBaseUrl(baseUrl) || DEFAULT_OLLAMA_BASE_URL;
   const [models, setModels] = useState<OllamaModel[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -68,10 +104,13 @@ export function useOllama(baseUrl = DEFAULT_OLLAMA_BASE_URL) {
 
   const refreshModels = useCallback(async () => {
     try {
-      const response = await fetch(`${baseUrl}/api/tags`);
+      const response = await ollamaFetch(`${normalizedBaseUrl}/api/tags`);
 
       if (!response.ok) {
-        throw new Error(`Failed to load Ollama models: ${response.statusText}`);
+        const detail = await readOllamaError(response);
+        throw new Error(
+          `Failed to load Ollama models (${response.status}): ${detail}`,
+        );
       }
 
       const data = (await response.json()) as TagsResponse;
@@ -82,7 +121,7 @@ export function useOllama(baseUrl = DEFAULT_OLLAMA_BASE_URL) {
       setError(message);
       setModels([]);
     }
-  }, [baseUrl]);
+  }, [normalizedBaseUrl]);
 
   useEffect(() => {
     void refreshModels();
@@ -94,7 +133,9 @@ export function useOllama(baseUrl = DEFAULT_OLLAMA_BASE_URL) {
       if (!selectedModel) return false;
 
       try {
-        const response = await fetch(`${baseUrl}/api/generate`, {
+        const response = await ollamaFetch(
+          `${normalizedBaseUrl}/api/generate`,
+          {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -105,7 +146,8 @@ export function useOllama(baseUrl = DEFAULT_OLLAMA_BASE_URL) {
             stream: false,
             keep_alive: "10m",
           }),
-        });
+          },
+        );
 
         if (!response.ok) {
           return false;
@@ -117,7 +159,97 @@ export function useOllama(baseUrl = DEFAULT_OLLAMA_BASE_URL) {
         return false;
       }
     },
-    [baseUrl],
+    [normalizedBaseUrl],
+  );
+
+  const shouldReadProject = useCallback(
+    async (
+      latestPrompt: string,
+      model: string,
+      recentMessages: OllamaChatMessage[] = [],
+    ) => {
+      const selectedModel = model.trim();
+
+      if (!selectedModel) {
+        throw new Error("No model selected. Install a local assistant model.");
+      }
+
+      const controller = new AbortController();
+      abortControllerRef.current = controller;
+      setIsGenerating(true);
+      setError(null);
+
+      try {
+        const response = await ollamaFetch(`${normalizedBaseUrl}/api/chat`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            model: selectedModel,
+            messages: [
+              {
+                role: "system",
+                content: projectRoutingProtocol,
+              },
+              ...recentMessages.slice(-3).map((message) => ({
+                role: message.role,
+                content: message.content.slice(0, 600),
+              })),
+              {
+                role: "user",
+                content: `Latest message:\n${latestPrompt}`,
+              },
+            ],
+            format: {
+              type: "object",
+              properties: {
+                readProject: {
+                  type: "boolean",
+                },
+              },
+              required: ["readProject"],
+              additionalProperties: false,
+            },
+            stream: false,
+            options: {
+              temperature: 0,
+              num_ctx: 2048,
+              num_predict: 40,
+            },
+          }),
+          signal: controller.signal,
+        });
+
+        if (!response.ok) {
+          const detail = await readOllamaError(response);
+          throw new Error(`Ollama API error ${response.status}: ${detail}`);
+        }
+
+        const data = (await response.json()) as ChatResponse;
+        const decision = JSON.parse(data.message?.content ?? "{}") as {
+          readProject?: unknown;
+        };
+
+        return resolveProjectRoutingDecision(
+          decision.readProject === true,
+          latestPrompt,
+          recentMessages,
+        );
+      } catch (err) {
+        if (err instanceof Error && err.name === "AbortError") {
+          throw new Error("Generation canceled.");
+        }
+
+        const message = getErrorMessage(err);
+        setError(message);
+        throw new Error(message);
+      } finally {
+        setIsGenerating(false);
+        abortControllerRef.current = null;
+      }
+    },
+    [normalizedBaseUrl],
   );
 
   const streamChat = useCallback(
@@ -151,20 +283,26 @@ export function useOllama(baseUrl = DEFAULT_OLLAMA_BASE_URL) {
         const controller = new AbortController();
         abortControllerRef.current = controller;
 
-        async function runChatRequest(optionsForRequest?: OllamaChatOptions) {
-          const response = await fetch(`${baseUrl}/api/chat`, {
+        async function runChatRequest(
+          requestMessages: OllamaChatMessage[],
+          optionsForRequest?: OllamaChatOptions,
+        ) {
+          const response = await ollamaFetch(
+            `${normalizedBaseUrl}/api/chat`,
+            {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
             },
             body: JSON.stringify({
               model: selectedModel,
-              messages,
+              messages: requestMessages,
               stream: true,
               ...(optionsForRequest ? { options: optionsForRequest } : {}),
             }),
-            signal: controller.signal,
-          });
+              signal: controller.signal,
+            },
+          );
 
           if (!response.ok) {
             const detail = await readOllamaError(response);
@@ -180,6 +318,7 @@ export function useOllama(baseUrl = DEFAULT_OLLAMA_BASE_URL) {
 
           let buffer = "";
           let fullText = "";
+          let doneReason = "";
 
           function handleLine(line: string) {
             const trimmed = line.trim();
@@ -189,6 +328,10 @@ export function useOllama(baseUrl = DEFAULT_OLLAMA_BASE_URL) {
 
             if (parsed.error) {
               throw new Error(parsed.error);
+            }
+
+            if (parsed.done_reason) {
+              doneReason = parsed.done_reason;
             }
 
             const chunk = parsed.message?.content ?? parsed.response ?? "";
@@ -218,30 +361,22 @@ export function useOllama(baseUrl = DEFAULT_OLLAMA_BASE_URL) {
             handleLine(buffer);
           }
 
-          return fullText;
+          return { text: fullText, doneReason };
         }
 
-        const firstText = await runChatRequest(options);
+        let result = await runChatRequest(messages, options);
 
-        if (firstText.trim() || !options) {
-          if (!firstText.trim()) {
-            throw new Error(
-              "Ollama returned an empty response. The selected model may not support this chat request, or Ollama may need a restart.",
-            );
-          }
-
-          return firstText;
+        if (!result.text.trim() && options) {
+          result = await runChatRequest(messages);
         }
 
-        const retryText = await runChatRequest();
-
-        if (!retryText.trim()) {
+        if (!result.text.trim()) {
           throw new Error(
             "Ollama returned an empty response. The selected model may not support this chat request, or Ollama may need a restart.",
           );
         }
 
-        return retryText;
+        return result.text;
       } catch (err) {
         if (
           err instanceof Error &&
@@ -258,7 +393,7 @@ export function useOllama(baseUrl = DEFAULT_OLLAMA_BASE_URL) {
         abortControllerRef.current = null;
       }
     },
-    [baseUrl],
+    [normalizedBaseUrl],
   );
 
   const cancelChat = useCallback(() => {
@@ -273,6 +408,7 @@ export function useOllama(baseUrl = DEFAULT_OLLAMA_BASE_URL) {
     error,
     refreshModels,
     cancelChat,
+    shouldReadProject,
     streamChat,
     warmModel,
   };

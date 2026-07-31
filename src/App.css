@@ -81,7 +81,6 @@ h3 {
 
 .app-shell {
   --bg: #131314;
-  --sidebar-bg: #1e1f20;
   --surface: #1e1f20;
   --surface-soft: #282a2c;
   --surface-raised: #303134;
@@ -146,7 +145,6 @@ h3 {
 
 .app-shell.theme-light {
   --bg: #ffffff;
-  --sidebar-bg: #f0f4f9;
   --surface: #ffffff;
   --surface-soft: #f0f4f9;
   --surface-raised: #e8eef5;
@@ -481,15 +479,8 @@ h3 {
   line-height: 1;
 }
 
-.sidebar-new-button {
+.sidebar-new-button:hover {
   color: var(--muted);
-}
-
-.sidebar-new-button:hover {
-  color: var(--text);
-}
-
-.sidebar-new-button:hover {
   background: var(--hover);
 }
 
@@ -792,14 +783,19 @@ h3 {
 
 .model-select-trigger {
   height: var(--control-height);
+  min-width: 0;
+  max-width: min(158px, 34vw);
+  padding: 0 28px 0 0;
 
-  border: 1px solid transparent;
+  border: 0;
   border-radius: 999px;
+  outline: none;
 
   color: var(--text);
   background: transparent;
 
-  padding: 0 14px;
+  line-height: 1.2;
+  text-align: left;
 }
 
 .model-select-trigger,
@@ -808,17 +804,6 @@ h3 {
 .model-select-trigger:focus-visible {
   background: transparent;
   box-shadow: none;
-}
-
-.model-select-trigger {
-  min-width: 0;
-  max-width: min(158px, 34vw);
-  outline: none;
-  padding: 0 28px 0 0;
-  line-height: 1.2;
-  border: 0;
-
-  text-align: left;
 }
 
 .model-select-value {
@@ -1071,6 +1056,9 @@ h3 {
 
 .cancel-button {
   padding: 0 12px;
+  border-radius: 999px;
+  color: #f28b82;
+  background: rgba(255, 124, 124, 0.12);
 }
 
 .response-loading-banner {
@@ -1083,12 +1071,6 @@ h3 {
   background: rgba(138, 180, 248, 0.12);
   color: var(--text);
   font-size: 0.92rem;
-}
-
-.cancel-button {
-  border-radius: 999px;
-  background: rgba(255, 124, 124, 0.12);
-  color: #f28b82;
 }
 
 .cancel-button:hover {
@@ -1177,27 +1159,6 @@ h3 {
   font-size: 0.84rem;
 }
 
-.canvas-starter-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 4px;
-}
-
-.canvas-starter-actions button {
-  padding: 7px 11px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  color: var(--text);
-  background: var(--surface-soft);
-  font-size: 0.78rem;
-}
-
-.canvas-starter-actions button:hover {
-  border-color: color-mix(in srgb, var(--accent) 38%, var(--border));
-  background: var(--hover);
-}
-
 .active-chat-heading {
   flex: 0 0 auto;
 
@@ -1239,12 +1200,6 @@ h3 {
 }
 
 .active-chat-title-edit {
-  border: 0;
-  color: var(--muted);
-  background: transparent;
-}
-
-.active-chat-title-edit {
   width: 25px;
   height: 25px;
   padding: 0;
@@ -1252,7 +1207,11 @@ h3 {
   display: inline-grid;
   place-items: center;
 
+  border: 0;
   border-radius: 999px;
+
+  color: var(--muted);
+  background: transparent;
   opacity: 0.38;
 }
 
@@ -1320,9 +1279,10 @@ h3 {
   gap: 12px;
 }
 
-.file-preview-summary span,
 .file-preview-status {
   color: var(--muted);
+  font-size: 0.76rem;
+  white-space: nowrap;
 }
 
 .file-preview-toggle {
@@ -1398,36 +1358,6 @@ h3 {
 .file-preview-detach:hover {
   color: var(--text);
   border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
-}
-
-.file-preview-summary {
-  min-width: 0;
-  padding: 8px 10px;
-
-  display: grid;
-  gap: 2px;
-
-  border: 1px solid var(--border);
-  border-radius: 14px;
-
-  background: color-mix(in srgb, var(--surface) 76%, transparent);
-  text-align: right;
-}
-
-.file-preview-panel:not(.open) .file-preview-summary {
-  display: none;
-}
-
-.file-preview-panel.open .file-preview-summary {
-  background: color-mix(in srgb, var(--surface) 88%, var(--accent) 4%);
-  border-color: color-mix(in srgb, var(--accent) 18%, var(--border));
-}
-
-.file-preview-summary strong,
-.file-preview-summary span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
 }
 
 .file-preview-tabs {
@@ -1538,11 +1468,6 @@ h3 {
 .file-preview-mode-button.active {
   color: var(--text);
   background: color-mix(in srgb, var(--accent) 12%, transparent);
-}
-
-.file-preview-status {
-  font-size: 0.76rem;
-  white-space: nowrap;
 }
 
 .file-preview-text {
@@ -2116,6 +2041,27 @@ h3 {
 
 .prompt-box {
   flex: 1;
+  width: 100%;
+  min-width: 0;
+  min-height: 32px;
+  max-height: 190px;
+
+  padding: 6px 3px;
+
+  resize: none;
+
+  border: 0;
+  outline: none;
+
+  color: var(--text);
+  background: transparent;
+
+  line-height: 1.25;
+
+  overflow-y: hidden;
+
+  scrollbar-width: thin;
+  scrollbar-color: var(--muted-soft) transparent;
 }
 
 .attach-button {
@@ -2159,37 +2105,12 @@ h3 {
   background: var(--hover);
 }
 
-.prompt-box {
-  width: 100%;
-  min-width: 0;
-  min-height: 32px;
-  max-height: 190px;
-
-  padding: 6px 3px;
-
-  resize: none;
-
-  border: 0;
-  outline: none;
-
-  color: var(--text);
-  background: transparent;
-
-  line-height: 1.25;
-
-  overflow-y: hidden;
-
-  scrollbar-width: thin;
-  scrollbar-color: var(--muted-soft) transparent;
-}
-
 .composer-shell.expanded .prompt-box {
   padding-top: 7px;
   padding-bottom: 7px;
 
   line-height: 1.35;
 }
-
 
 .prompt-box::placeholder {
   color: var(--muted-soft);
@@ -2210,6 +2131,7 @@ h3 {
 
 .send-button {
   height: var(--control-height);
+  min-width: 60px;
   padding: 0 var(--send-button-padding);
 
   border-radius: 999px;
@@ -2219,7 +2141,10 @@ h3 {
   white-space: nowrap;
 
   font-size: var(--send-font-size);
-  font-weight: 500;
+  color: var(--send-text);
+  background: var(--send-bg);
+
+  font-weight: 600;
 
   display: inline-flex;
   align-items: center;
@@ -2251,20 +2176,10 @@ h3 {
   cursor: not-allowed;
 }
 
-.send-button {
-  min-width: 60px;
-
-  color: var(--send-text);
-  background: var(--send-bg);
-
-  font-weight: 600;
-}
-
 .send-button:hover:not(:disabled) {
   box-shadow:
     0 3px 10px rgba(0, 0, 0, 0.16);
 }
-
 
 /* Drag overlay */
 
@@ -2339,14 +2254,6 @@ h3 {
       var(--accent) 32%,
       transparent
     );
-}
-
-.active-chat-title-edit:focus-visible,
-.turn-action-button:focus-visible,
-.canvas-starter-actions button:focus-visible,
-.active-chat-title-input:focus-visible {
-  outline: none;
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 32%, transparent);
 }
 
 /* Responsive */
@@ -2463,10 +2370,6 @@ h3 {
 
   .file-preview-panel:not(.open) {
     max-height: none;
-  }
-
-  .file-preview-summary {
-    padding: 9px 10px;
   }
 
   .settings-card {
