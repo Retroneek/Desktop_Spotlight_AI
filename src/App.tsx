@@ -14,6 +14,9 @@ import {
   buildCompactPrompt,
   buildPrompt,
   createFolderAttachmentFromScan,
+  hydrateLiveFolderAttachment,
+  liveFolderQueryNeedsContents,
+  selectLiveFolderPaths,
   type ProjectFolderScan,
   summarizeBrowserFolder,
   truncateContext,
@@ -26,6 +29,14 @@ import {
 import { useOllama } from "./services/ollama";
 import { buildProjectRetrievalQuery } from "./services/chatProtocol";
 import { normalizeOllamaBaseUrl } from "./services/endpoint";
+import {
+  browseLiveFolder,
+  inspectLiveFolderEntries,
+  readLiveFolderFileChunk,
+  readLiveFolderFiles,
+  refreshLiveFolder,
+  searchLiveFolder,
+} from "./services/liveFolder";
 import {
   composerLayout,
   folderInputAttributes,
@@ -75,6 +86,40 @@ import { SettingsPanel } from "./components/SettingsPanel";
 import { Sidebar } from "./components/Sidebar";
 import "./App.css";
 
+function workspaceToolString(
+  argumentsValue: Record<string, unknown>,
+  key: string,
+  fallback = "",
+) {
+  const value = argumentsValue[key];
+  return typeof value === "string" ? value.trim() : fallback;
+}
+
+function workspaceToolInteger(
+  argumentsValue: Record<string, unknown>,
+  key: string,
+  fallback: number,
+  maximum: number,
+) {
+  const value = argumentsValue[key];
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, Math.min(maximum, Math.floor(value)))
+    : fallback;
+}
+
+function workspaceToolPaths(argumentsValue: Record<string, unknown>, maximum: number) {
+  const value = argumentsValue.paths;
+  if (!Array.isArray(value)) return [];
+  return [
+    ...new Set(
+      value.filter(
+        (path): path is string =>
+          typeof path === "string" && Boolean(path.trim()),
+      ),
+    ),
+  ].slice(0, maximum);
+}
+
 function App() {
   const initialStateRef = useRef(getInitialAppState());
   const initialAttachedFilesRef = useRef(getInitialAttachedFiles());
@@ -94,6 +139,8 @@ function App() {
     refreshModels,
     cancelChat,
     shouldReadProject,
+    selectProjectFiles,
+    runLiveWorkspaceAgent,
     warmModel,
   } = useOllama(ollamaEndpoint);
 
@@ -129,6 +176,7 @@ function App() {
 
   const [message, setMessage] = useState("");
   const [isDragging, setIsDragging] = useState(false);
+  const [workspaceActivity, setWorkspaceActivity] = useState("");
   const [isComposerExpanded, setIsComposerExpanded] = useState(false);
   const [selectedPreviewFileId, setSelectedPreviewFileId] = useState<
     string | null
@@ -160,9 +208,13 @@ function App() {
   const warmedModelRef = useRef("");
 
   const availableModelNames = useMemo(() => {
-    return getModelList(models)
-      .map(getModelName)
-      .filter((name): name is string => Boolean(name))
+    return [...new Set(
+      getModelList(models)
+        .map(getModelName)
+        .filter((name): name is string => typeof name === "string")
+        .map((name) => name.trim())
+        .filter(Boolean),
+    )]
       .sort(
         (left, right) =>
           getModelPreferenceScore(right) - getModelPreferenceScore(left) ||
@@ -379,10 +431,14 @@ function App() {
 
   useEffect(() => {
     const saveTimer = window.setTimeout(() => {
-      localStorage.setItem(
-        storageKeys.attachments,
-        JSON.stringify(contextAttachments),
-      );
+      try {
+        localStorage.setItem(
+          storageKeys.attachments,
+          JSON.stringify(contextAttachments),
+        );
+      } catch {
+        // Attachments remain usable in memory if browser storage is full.
+      }
     }, 250);
 
     return () => {
@@ -412,6 +468,12 @@ function App() {
       setSelectedPreviewFileId(contextAttachments[0].id);
     }
   }, [contextAttachments, isPreviewOpen, selectedPreviewFileId]);
+
+  useEffect(() => {
+    if (projectContext?.sourcePath && !projectContext.liveEntries) {
+      void rescanLiveFolder(projectContext);
+    }
+  }, [projectContext?.id, projectContext?.sourcePath]);
 
   useEffect(() => {
     localStorage.setItem(storageKeys.activeSession, activeSessionId);
@@ -826,11 +888,12 @@ function App() {
     const files = turn.files ?? [];
     const folderReference =
       files.find((file) => file.kind === "folder") ?? null;
-    const folder =
+    const isSameFolderStillAttached =
       folderReference &&
-      projectContext?.name === folderReference.name
-        ? projectContext
-        : folderReference;
+      projectContext?.name === folderReference.name &&
+      projectContext?.folderStats?.filesIncluded ===
+        folderReference.folderStats?.filesIncluded;
+    const folder = isSameFolderStillAttached ? projectContext : folderReference;
     const draftFiles = files.filter((file) => file.kind !== "folder");
 
     setMessage(turn.content);
@@ -886,6 +949,32 @@ function App() {
       .catch(() => {
         folderInputRef.current?.click();
       });
+  }
+
+  async function rescanLiveFolder(folder: AttachedFile, required = false) {
+    if (!folder.sourcePath) return folder;
+
+    try {
+      const scan = await refreshLiveFolder(folder.sourcePath);
+      const refreshed = {
+        ...createFolderAttachmentFromScan(scan),
+        id: folder.id,
+        sourcePath: folder.sourcePath,
+      };
+      setProjectContext((current) =>
+        current?.id === folder.id ? refreshed : current,
+      );
+      return refreshed;
+    } catch (caughtError) {
+      if (required) {
+        const detail =
+          caughtError instanceof Error ? caughtError.message : String(caughtError);
+        throw new Error(
+          `The attached folder could not be refreshed${detail ? `: ${detail}` : "."}`,
+        );
+      }
+      return folder;
+    }
   }
 
   function clearAttachmentInputs() {
@@ -1055,6 +1144,8 @@ function App() {
       let returnedText = "";
       let shouldUseProjectContext = false;
       let retrievalQuery = visibleContent;
+      let promptFolderFiles = folderFiles;
+      let usedLiveWorkspaceAgent = false;
 
       try {
         shouldUseProjectContext = folderFiles.length
@@ -1071,32 +1162,240 @@ function App() {
             visibleContent,
             recentContextHistory.slice(-2),
           );
-
-          const modelPrompt = buildAttachmentAwarePrompt(
-            visibleContent,
-            directFiles,
-            folderFiles,
-            false,
-            retrievalQuery,
+          const refreshedFolderFiles = await Promise.all(
+            folderFiles.map((folder) => rescanLiveFolder(folder, true)),
+          );
+          const currentFilesForTurn = filesForTurn.map((file) =>
+            file.kind === "folder"
+              ? refreshedFolderFiles.find(
+                  (folder) => folder.id === file.id,
+                ) ?? file
+              : file,
+          );
+          const liveToolFolder = refreshedFolderFiles.find(
+            (folder) => Boolean(folder.sourcePath),
           );
 
-          requestMessages = buildMessages(
-            requestSession,
-            modelPrompt,
-            hardwareProfile,
-            filesForTurn,
-            "",
-          );
+          if (liveToolFolder?.sourcePath) {
+            const livePrompt = buildAttachmentAwarePrompt(
+              visibleContent,
+              directFiles,
+              refreshedFolderFiles,
+              true,
+              retrievalQuery,
+            );
+            const liveMessages = buildMessages(
+              requestSession,
+              livePrompt,
+              hardwareProfile,
+              currentFilesForTurn,
+              "",
+            );
+            try {
+              returnedText = await runLiveWorkspaceAgent(
+                liveMessages,
+                activeModelName,
+                async (toolName, argumentsValue) => {
+                  const basePath = liveToolFolder.sourcePath as string;
+                  switch (toolName) {
+                    case "list_workspace_directory": {
+                      const page = await browseLiveFolder(
+                        basePath,
+                        workspaceToolString(argumentsValue, "path"),
+                        workspaceToolInteger(
+                          argumentsValue,
+                          "cursor",
+                          0,
+                          1_000_000_000,
+                        ),
+                        workspaceToolInteger(argumentsValue, "limit", 100, 200),
+                      );
+                      return JSON.stringify(page);
+                    }
+                    case "search_workspace_paths": {
+                      const page = await searchLiveFolder(
+                        basePath,
+                        workspaceToolString(argumentsValue, "query"),
+                        workspaceToolInteger(
+                          argumentsValue,
+                          "cursor",
+                          0,
+                          1_000_000_000,
+                        ),
+                        workspaceToolInteger(argumentsValue, "limit", 100, 200),
+                      );
+                      return JSON.stringify(page);
+                    }
+                    case "inspect_workspace_entries": {
+                      const paths = workspaceToolPaths(argumentsValue, 64);
+                      if (!paths.length) {
+                        throw new Error("No paths were provided.");
+                      }
+                      return JSON.stringify(
+                        await inspectLiveFolderEntries(basePath, paths),
+                      );
+                    }
+                    case "read_workspace_text_files": {
+                      const paths = workspaceToolPaths(argumentsValue, 8);
+                      if (!paths.length) {
+                        throw new Error("No paths were provided.");
+                      }
+                      const files = await readLiveFolderFiles(basePath, paths);
+                      const excerptSize = Math.max(
+                        1_000,
+                        Math.floor(15_000 / Math.max(1, files.length)),
+                      );
+                      return files
+                        .map(
+                          (file) =>
+                            `<live_file path=${JSON.stringify(file.path)} size=${JSON.stringify(file.size)}>\n${truncateContext(file.contents, excerptSize)}\n</live_file>`,
+                        )
+                        .join("\n\n");
+                    }
+                    case "read_workspace_text_chunk": {
+                      const path = workspaceToolString(argumentsValue, "path");
+                      if (!path) {
+                        throw new Error("No path was provided.");
+                      }
+                      const chunk = await readLiveFolderFileChunk(
+                        basePath,
+                        path,
+                        workspaceToolInteger(
+                          argumentsValue,
+                          "offset",
+                          0,
+                          Number.MAX_SAFE_INTEGER,
+                        ),
+                        workspaceToolInteger(
+                          argumentsValue,
+                          "maxBytes",
+                          12_000,
+                          16_000,
+                        ),
+                      );
+                      return `<live_file_chunk path=${JSON.stringify(chunk.path)} offset=${chunk.offset} nextOffset=${chunk.nextOffset ?? "complete"} totalBytes=${chunk.totalBytes}>\n${chunk.content}\n</live_file_chunk>`;
+                    }
+                    default:
+                      throw new Error(
+                        `Unknown workspace tool: ${toolName || "unnamed"}`,
+                      );
+                  }
+                },
+                handleToken,
+                buildGenerationOptions(currentFilesForTurn),
+                setWorkspaceActivity,
+              );
+              promptFolderFiles = refreshedFolderFiles;
+              usedLiveWorkspaceAgent = true;
+            } catch (workspaceAgentError) {
+              if (
+                workspaceAgentError instanceof Error &&
+                workspaceAgentError.message === "Generation canceled."
+              ) {
+                throw workspaceAgentError;
+              }
+            }
+          }
+
+          if (!usedLiveWorkspaceAgent) {
+            promptFolderFiles = await Promise.all(
+              refreshedFolderFiles.map(async (folder) => {
+                if (!folder.sourcePath || !folder.liveEntries?.length) {
+                  return folder;
+                }
+
+                let selectedPaths: string[];
+                try {
+                  selectedPaths = await selectProjectFiles(
+                    retrievalQuery,
+                    activeModelName,
+                    folder.liveEntries,
+                  );
+                  if (
+                    !selectedPaths.length &&
+                    liveFolderQueryNeedsContents(retrievalQuery)
+                  ) {
+                    selectedPaths = selectLiveFolderPaths(
+                      folder,
+                      retrievalQuery,
+                    );
+                  }
+                } catch (selectionError) {
+                  if (
+                    selectionError instanceof Error &&
+                    selectionError.message === "Generation canceled."
+                  ) {
+                    throw selectionError;
+                  }
+                  selectedPaths = selectLiveFolderPaths(folder, retrievalQuery);
+                }
+
+                if (!selectedPaths.length) return folder;
+
+                try {
+                  let liveFiles = await readLiveFolderFiles(
+                    folder.sourcePath,
+                    selectedPaths,
+                  );
+                  if (liveFiles.length < 8) {
+                    try {
+                      const followUpPaths = await selectProjectFiles(
+                        retrievalQuery,
+                        activeModelName,
+                        folder.liveEntries,
+                        liveFiles,
+                      );
+                      if (followUpPaths.length) {
+                        const followUpFiles = await readLiveFolderFiles(
+                          folder.sourcePath,
+                          followUpPaths.slice(0, 8 - liveFiles.length),
+                        );
+                        liveFiles = [...liveFiles, ...followUpFiles];
+                      }
+                    } catch (followUpError) {
+                      if (
+                        followUpError instanceof Error &&
+                        followUpError.message === "Generation canceled."
+                      ) {
+                        throw followUpError;
+                      }
+                    }
+                  }
+                  return hydrateLiveFolderAttachment(folder, liveFiles);
+                } catch {
+                  return folder;
+                }
+              }),
+            );
+
+            const modelPrompt = buildAttachmentAwarePrompt(
+              visibleContent,
+              directFiles,
+              promptFolderFiles,
+              false,
+              retrievalQuery,
+            );
+
+            requestMessages = buildMessages(
+              requestSession,
+              modelPrompt,
+              hardwareProfile,
+              currentFilesForTurn,
+              "",
+            );
+          }
         }
 
-        returnedText = await streamChat(
-          requestMessages,
-          activeModelName,
-          handleToken,
-          buildGenerationOptions(
-            shouldUseProjectContext ? filesForTurn : directFiles,
-          ),
-        );
+        if (!usedLiveWorkspaceAgent) {
+          returnedText = await streamChat(
+            requestMessages,
+            activeModelName,
+            handleToken,
+            buildGenerationOptions(
+              shouldUseProjectContext ? filesForTurn : directFiles,
+            ),
+          );
+        }
       } catch (primaryError) {
         const errorMessage =
           primaryError instanceof Error ? primaryError.message : "";
@@ -1114,13 +1413,13 @@ function App() {
           ? buildAttachmentAwarePrompt(
               visibleContent,
               directFiles,
-              folderFiles,
+              promptFolderFiles,
               true,
               retrievalQuery,
             )
           : buildCompactPrompt(visibleContent, directFiles);
         const compactBackgroundContext = shouldUseProjectContext
-          ? buildBackgroundContext(folderFiles, true, retrievalQuery)
+          ? buildBackgroundContext(promptFolderFiles, true, retrievalQuery)
           : "";
         const compactMessages = buildMessages(
           requestSession,
@@ -1187,6 +1486,7 @@ function App() {
       streamedTextRef.current = "";
       setStreamingTurnId(null);
       setIsCanceling(false);
+      setWorkspaceActivity("");
     }
   }
 
@@ -1218,8 +1518,6 @@ function App() {
     const visibleContent =
       trimmedMessage ||
       `Attached ${filesForTurn.length} file(s).`;
-
-    clearComposerAttachmentsAfterSend();
 
     await runAssistantReply({
       sessionId: activeSession.id,
@@ -1329,7 +1627,18 @@ function App() {
     setIsDragging(false);
 
     if (event.dataTransfer.files.length) {
-      void addFiles(event.dataTransfer.files);
+      const droppedFiles = Array.from(event.dataTransfer.files);
+      const includesRelativePaths = droppedFiles.some((file) => {
+        const relativePath = (file as File & { webkitRelativePath?: string })
+          .webkitRelativePath;
+        return Boolean(relativePath && relativePath.includes("/"));
+      });
+
+      if (includesRelativePaths) {
+        void addBrowserFolder(droppedFiles);
+      } else {
+        void addFiles(droppedFiles);
+      }
     }
   }
 
@@ -1434,7 +1743,6 @@ function App() {
             ref={folderInputRef}
             type="file"
             multiple
-            accept=".md,.txt,.json,.ts,.tsx,.js,.jsx,.css,.html,.rs,.toml,.env.example,.gitignore"
             onChange={(event) => {
               void addBrowserFolder(
                 event.currentTarget.files ?? [],
@@ -1542,10 +1850,17 @@ function App() {
               regenerateTarget?.assistantTurn.id
             }
             isGenerating={isGenerating}
+            generationActivity={workspaceActivity}
             responseLogRef={responseLogRef}
             session={activeSession}
             streamingTextElementRef={streamingTextElementRef}
             streamingTurnId={streamingTurnId}
+            folderPath={projectContext?.sourcePath}
+            onFilesystemApplied={() => {
+              if (projectContext) {
+                void rescanLiveFolder(projectContext);
+              }
+            }}
             onCopyResponse={(content) => {
               void copyResponse(content);
             }}

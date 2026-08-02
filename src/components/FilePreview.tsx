@@ -86,8 +86,14 @@ export function FilePreview({
               <span>
                 Attached folder: <strong>{selectedFile.folderStats.rootName}</strong>
               </span>
+              <span>
+                {selectedFile.sourcePath ? "Live Windows folder" : "Read-only snapshot"}
+              </span>
               <span>{selectedFile.folderStats.filesFound} files found</span>
-              <span>{selectedFile.folderStats.filesIncluded} included</span>
+              <span>
+                {selectedFile.folderStats.filesIncluded}{" "}
+                {selectedFile.sourcePath ? "readable on demand" : "included"}
+              </span>
               <span>{selectedFile.folderStats.filesIgnored} ignored</span>
               <span>{selectedFile.folderStats.filesSkipped} skipped</span>
             </div>
@@ -108,7 +114,7 @@ export function FilePreview({
                 }`}
                 onClick={() => onPreviewModeChange("extracted")}
               >
-                Extracted
+                {selectedFile.sourcePath ? "Inventory" : "Extracted"}
               </button>
               <button
                 type="button"
@@ -126,7 +132,9 @@ export function FilePreview({
               {previewMode === "sent"
                 ? "Current draft plus attached file context"
                 : selectedFile.kind === "folder"
-                  ? "Ready for local project questions"
+                  ? selectedFile.sourcePath
+                    ? "Live inventory; contents are read only when needed"
+                    : "Read-only snapshot; reselect in the Windows app for file actions"
                   : selectedFile.supported
                     ? "Ready for local analysis"
                     : "Preview unavailable for this file type"}

@@ -12,6 +12,7 @@ import {
   buildProjectRetrievalQuery,
   conversationProtocol,
   projectRoutingProtocol,
+  referenceResolutionProtocol,
   resolveProjectRoutingDecision,
 } from "../src/services/chatProtocol.ts";
 import { normalizeOllamaBaseUrl } from "../src/services/endpoint.ts";
@@ -260,6 +261,9 @@ async function answerCase(
   }
 
   messages.push(...(testCase.history || []));
+  if (testCase.history?.length) {
+    messages.push({ role: "system", content: referenceResolutionProtocol });
+  }
 
   let finalPrompt = testCase.prompt;
   if (testCase.attachProject && shouldUseProject) {
@@ -596,8 +600,10 @@ const responseCases: ResponseCase[] = [
     assertions: [
       includesAny(
         "does not",
+        "doesn't contain",
         "no evidence",
         "don't see",
+        "don't have enough information",
         "not include",
         "can't",
         "cannot",

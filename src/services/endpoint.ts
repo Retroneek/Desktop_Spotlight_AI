@@ -15,12 +15,17 @@ export function normalizeOllamaBaseUrl(value: string) {
     const url = new URL(candidate);
 
     if (url.protocol !== "http:" && url.protocol !== "https:") {
-      return trimmed.replace(/\/+$/, "");
+      return "";
     }
 
-    const path = url.pathname.replace(/\/+$/, "");
-    return `${url.origin}${path}${url.search}`;
+    let path = url.pathname.replace(/\/+$/, "");
+    // Ollama's REST routes already append /api. Accepting a pasted
+    // /api endpoint is convenient, but retaining it would request /api/api/*.
+    if (/\/api$/i.test(path)) {
+      path = path.slice(0, -4).replace(/\/+$/, "");
+    }
+    return `${url.origin}${path}`;
   } catch {
-    return trimmed.replace(/\/+$/, "");
+    return "";
   }
 }

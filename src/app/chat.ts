@@ -5,7 +5,11 @@ import {
   buildPrompt,
   truncateContext,
 } from "../services/contextBuilder";
-import { conversationProtocol } from "../services/chatProtocol";
+import {
+  conversationProtocol,
+  filesystemOperationProtocol,
+  referenceResolutionProtocol,
+} from "../services/chatProtocol";
 import type { OllamaChatOptions } from "../services/ollama";
 import { runtimeProfiles, type HardwareProfileId } from "./config";
 import type { AttachedFile, ChatSession, OllamaMessage } from "./types";
@@ -22,6 +26,9 @@ export function buildMessages(
 ): OllamaMessage[] {
   const runtimeProfile = runtimeProfiles[hardwareProfile];
   const hasFolderContext = files.some((file) => file.kind === "folder");
+  const hasWritableFolderContext = files.some(
+    (file) => file.kind === "folder" && Boolean(file.sourcePath),
+  );
   const recentMessageCount = hasFolderContext
     ? Math.min(2, runtimeProfile.recentMessageCount)
     : runtimeProfile.recentMessageCount;
@@ -59,6 +66,9 @@ export function buildMessages(
 
   return [
     { role: "system", content: conversationProtocol },
+    ...(hasWritableFolderContext
+      ? [{ role: "system" as const, content: filesystemOperationProtocol }]
+      : []),
     ...(attachmentStateContext
       ? [{ role: "system" as const, content: attachmentStateContext }]
       : []),
@@ -66,6 +76,9 @@ export function buildMessages(
       ? [{ role: "system" as const, content: backgroundContext }]
       : []),
     ...recentMessages,
+    ...(recentMessages.length
+      ? [{ role: "system" as const, content: referenceResolutionProtocol }]
+      : []),
     { role: "user", content: prompt },
   ];
 }
@@ -88,7 +101,9 @@ export function buildAttachmentAwarePrompt(
       const includedFiles = folder.folderStats?.filesIncluded;
       const countLabel =
         typeof includedFiles === "number"
-          ? `, ${includedFiles} files included`
+          ? folder.sourcePath
+            ? `, ${folder.folderStats?.filesFound ?? includedFiles} live entries, ${includedFiles} text files readable on demand`
+            : `, ${includedFiles} files included in the snapshot`
           : "";
       return `Attached project folder: ${folder.name}${countLabel}.`;
     })

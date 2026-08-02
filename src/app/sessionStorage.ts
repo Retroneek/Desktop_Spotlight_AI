@@ -84,21 +84,25 @@ export function createPersistableSessions(sessions: ChatSession[]) {
     ...session,
     turns: session.turns.map((turn) => ({
       ...turn,
-      files: turn.files?.map((file) =>
-        file.kind === "folder"
-          ? {
-              ...file,
-              preview: "",
-              supported: false,
-              skippedFiles: [],
-            }
-          : {
-              ...file,
-              preview: truncateContext(file.preview, 2_000),
-            },
-      ),
+      files: turn.files?.map(normalizePersistedAttachment),
     })),
   }));
+}
+
+function normalizePersistedAttachment(file: AttachedFile): AttachedFile {
+  return file.kind === "folder"
+    ? {
+        ...file,
+        preview: "",
+        supported: false,
+        sourcePath: undefined,
+        liveEntries: undefined,
+        skippedFiles: [],
+      }
+    : {
+        ...file,
+        preview: truncateContext(file.preview, 2_000),
+      };
 }
 
 function getInitialSessions(): ChatSession[] {
@@ -147,39 +151,68 @@ export function getInitialAttachedFiles(): AttachedFile[] {
     const parsed = JSON.parse(stored) as AttachedFile[];
     if (!Array.isArray(parsed)) return [];
 
-    return parsed.map((file) => {
-      const kind = file.kind === "folder" ? "folder" : "file";
-      const preview = typeof file.preview === "string" ? file.preview : "";
-
-      return {
-        id: typeof file.id === "string" ? file.id : createId("file"),
-        kind,
-        name: typeof file.name === "string" ? file.name : "Untitled file",
-        typeLabel: typeof file.typeLabel === "string" ? file.typeLabel : "file",
-        sizeLabel: typeof file.sizeLabel === "string" ? file.sizeLabel : "0 B",
-        preview:
-          kind === "folder" ? truncateContext(preview, 450_000) : preview,
-        supported: Boolean(file.supported),
-        folderStats:
-          file.folderStats &&
-          typeof file.folderStats === "object" &&
-          typeof file.folderStats.rootName === "string"
-            ? file.folderStats
-            : undefined,
-        skippedFiles: Array.isArray(file.skippedFiles)
-          ? file.skippedFiles.filter(
-              (item): item is SkippedFolderFile =>
-                item &&
-                typeof item === "object" &&
-                typeof item.path === "string" &&
-                typeof item.reason === "string",
-            )
-          : undefined,
-      };
-    });
+    return parsed.map(normalizeStoredAttachment);
   } catch {
     return [];
   }
+}
+
+function normalizeStoredAttachment(file: AttachedFile): AttachedFile {
+  const kind = file.kind === "folder" ? "folder" : "file";
+  const preview = typeof file.preview === "string" ? file.preview : "";
+
+  return {
+    id: typeof file.id === "string" ? file.id : createId("file"),
+    kind,
+    name: typeof file.name === "string" ? file.name : "Untitled file",
+    typeLabel: typeof file.typeLabel === "string" ? file.typeLabel : "file",
+    sizeLabel: typeof file.sizeLabel === "string" ? file.sizeLabel : "0 B",
+    preview:
+      kind === "folder" ? truncateContext(preview, 450_000) : preview,
+    supported: Boolean(file.supported),
+    sourcePath:
+      kind === "folder" &&
+      typeof file.sourcePath === "string" &&
+      file.sourcePath.trim()
+        ? file.sourcePath
+        : undefined,
+    liveEntries:
+      kind === "folder" && Array.isArray(file.liveEntries)
+        ? file.liveEntries
+            .filter(
+              (entry) =>
+                entry &&
+                typeof entry === "object" &&
+                typeof entry.path === "string" &&
+                typeof entry.size === "number" &&
+                typeof entry.readable === "boolean",
+            )
+            .map((entry) => ({
+              path: entry.path,
+              size: entry.size,
+              modifiedAt:
+                typeof entry.modifiedAt === "number"
+                  ? entry.modifiedAt
+                  : undefined,
+              readable: entry.readable,
+            }))
+        : undefined,
+    folderStats:
+      file.folderStats &&
+      typeof file.folderStats === "object" &&
+      typeof file.folderStats.rootName === "string"
+        ? file.folderStats
+        : undefined,
+    skippedFiles: Array.isArray(file.skippedFiles)
+      ? file.skippedFiles.filter(
+          (item): item is SkippedFolderFile =>
+            item &&
+            typeof item === "object" &&
+            typeof item.path === "string" &&
+            typeof item.reason === "string",
+        )
+      : undefined,
+  };
 }
 
 export function getInitialAppState() {

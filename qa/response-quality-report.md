@@ -1,6 +1,6 @@
 # Desktop Spotlight AI — Response Quality Evidence
 
-Generated: 2026-07-31T17:51:38.696Z
+Generated: 2026-08-02T19:00:14.888Z
 Model: `qwen2.5-coder:14b`
 Ollama endpoint: `http://127.0.0.1:11434`
 Overall: **53/53 passed**
@@ -56,7 +56,7 @@ Selected source paths:
 - S04: `Desktop_Spotlight_AI/src-tauri/tauri.conf.json`, `Desktop_Spotlight_AI/package.json`, `Desktop_Spotlight_AI/src-tauri/Cargo.toml`, `Desktop_Spotlight_AI/src-tauri/capabilities/default.json`
 - S05: `Desktop_Spotlight_AI/src/App.tsx`
 - S06: `Desktop_Spotlight_AI/src/services/endpoint.ts`, `Desktop_Spotlight_AI/src/App.tsx`, `Desktop_Spotlight_AI/src/App.css`
-- S07: `Desktop_Spotlight_AI/README.md`
+- S07: `Desktop_Spotlight_AI/README.md`, `Desktop_Spotlight_AI/src/services/chatProtocol.ts`
 - S08: `Desktop_Spotlight_AI/src-tauri/Cargo.toml`, `Desktop_Spotlight_AI/src-tauri/tauri.conf.json`, `Desktop_Spotlight_AI/src-tauri/capabilities/default.json`, `Desktop_Spotlight_AI/package.json`
 - S09: `Desktop_Spotlight_AI/src-tauri/src/commands/files.rs`, `Desktop_Spotlight_AI/src/services/contextBuilder.ts`, `Desktop_Spotlight_AI/src-tauri/src/lib.rs`, `Desktop_Spotlight_AI/src-tauri/src/main.rs`
 
@@ -85,7 +85,7 @@ Assertions:
 Actual model answer:
 
 ```text
-I'm just a computer program, so I don't have feelings, but I'm here and ready to help you! How can I assist you today?
+I'm just a computer program, so I don't have feelings, but thanks for asking! How can I assist you today?
 ```
 
 ### R02 — reaction, not a request — PASS
@@ -102,7 +102,7 @@ Assertions:
 Actual model answer:
 
 ```text
-Yes, I understand that the assistant is being used through the Desktop Spotlight AI host application. If you have any specific questions or need assistance with anything related to this application, feel free to ask!
+Yes, I understood your earlier message. How else can I assist you today?
 ```
 
 ### R03 — correction, not a request — PASS
@@ -120,7 +120,7 @@ Assertions:
 Actual model answer:
 
 ```text
-Yes, I am part of the Desktop Spotlight AI application. How can I assist you today?
+I am the Desktop Spotlight AI host application.
 ```
 
 ### R04 — attachment acknowledgement — PASS
@@ -138,7 +138,7 @@ Assertions:
 Actual model answer:
 
 ```text
-Understood. How can I assist you with the attached files?
+Got it. How can I assist you with the attached files?
 ```
 
 ### R05 — ambiguous comment — PASS
@@ -155,7 +155,7 @@ Assertions:
 Actual model answer:
 
 ```text
-Oh no! Let me know if you need any help with anything else.
+I'm sorry to hear that. If you need help with anything else or have any questions, feel free to ask!
 ```
 
 ### R06 — conversational project reference — PASS
@@ -173,7 +173,7 @@ Assertions:
 Actual model answer:
 
 ```text
-Yes, I am part of the Desktop Spotlight AI application.
+Yes, I am aware that this conversation is happening through the Desktop Spotlight AI host application.
 ```
 
 ### R07 — project purpose — PASS
@@ -192,7 +192,7 @@ Assertions:
 Actual model answer:
 
 ```text
-This project is a private Windows desktop chat application powered by locally installed Ollama models. It supports persistent conversations, file attachments, and evidence-based questions about attached project folders. The application is designed to provide users with a local, secure environment for chatting and querying information based on the files they have attached to the application.
+This project is a private Windows desktop chat application powered by locally installed Ollama models. It supports persistent conversations, file attachments, and evidence-based questions about attached project folders. The app allows users to interact with chat models using their local machine's resources, ensuring data privacy and security. Users can ask questions about the contents of attached folders, and the app will provide answers based on the files available in those folders.
 ```
 
 ### R08 — specific follow-up — PASS
@@ -211,7 +211,15 @@ Assertions:
 Actual model answer:
 
 ```text
-With the Desktop Spotlight AI project, users can interact with a local desktop AI assistant. The assistant can process and respond to text-based queries, generate content, and manage conversations. Users can also configure settings related to the assistant's behavior and appearance. The project includes features for managing attachments, previewing files, and handling different types of user input. Additionally, it supports integration with a local model server (Ollama) for generating responses based on user prompts.
+This project, Desktop_Spotlight_AI, is a local desktop AI assistant application. It allows users to interact with an AI model through a chat interface and provides functionalities such as:
+
+1. **Chat Interaction**: Users can send messages to the AI model, which processes the input and generates responses based on the conversation history.
+2. **File Context Integration**: The application can include context from files within a specified folder, allowing the AI to reference and respond based on the contents of those files.
+3. **Model Management**: Users can manage different chat models installed locally, switch between them, and see their status (e.g., whether they are running or not).
+4. **Configuration and Customization**: The application can be configured with various settings, such as file paths, model names, and UI preferences, to tailor the user experience.
+5. **Quality Assurance Testing**: The project includes scripts for quality assurance testing, ensuring that the application functions correctly and meets certain standards.
+
+These features make Desktop_Spotlight_AI a versatile tool for users who want to interact with AI models locally while having access to file-based context and model management capabilities.
 ```
 
 ### R09 — exact API evidence — PASS
@@ -230,9 +238,9 @@ Actual model answer:
 ```text
 The source calls the following Ollama API endpoints:
 
-1. **`/api/tags`** - Used by the `refreshModels` function to load Ollama models.
-2. **`/api/generate`** - Used by the `warmModel` function to generate a response from a model.
-3. **`/api/chat`** - Used by the `shouldReadProject` and `runChatRequest` functions for chat-related operations.
+1. **/api/tags** - Used by the `refreshModels` function to load Ollama models.
+2. **/api/generate** - Used by the `warmModel` function to generate a response from a model.
+3. **/api/chat** - Used by the `shouldReadProject`, `selectProjectFiles`, and `runChatRequest` functions for chat-related operations.
 ```
 
 ### R10 — exact implementation detail — PASS
@@ -266,12 +274,17 @@ Assertions:
 Actual model answer:
 
 ```text
-The `.sidebar.collapsed` rule in `App.css` changes the padding and gap of the sidebar when it is collapsed. Specifically:
+The `.sidebar.collapsed` rule in `App.css` changes the padding of the collapsed sidebar. Specifically, it sets the padding to:
 
-- The padding is set to `calc(var(--sidebar-padding-y) - 4px)` for the top and bottom, and `calc(var(--sidebar-padding-x) - 2px)` for the left and right.
-- The gap is set to `0`.
+```css
+.sidebar.collapsed {
+  padding:
+    calc(var(--sidebar-padding-y) - 4px)
+    calc(var(--sidebar-padding-x) - 2px);
+}
+```
 
-This rule effectively reduces the space around the collapsed sidebar and removes any gaps between its elements.
+This reduces the padding by 4 pixels on the top and bottom (`--sidebar-padding-y`) and by 2 pixels on the left and right (`--sidebar-padding-x`).
 ```
 
 ### R12 — ignore-policy evidence — PASS
@@ -293,7 +306,7 @@ The project scanner deliberately ignores the following folders and secret files:
 - Folders: `node_modules`, `.git`, `dist`, `build`, `target`, `.cache`, `.next`, `.vite`
 - Secret files: `.env`
 
-These paths are excluded from being read by the model context to ensure privacy and security.
+These paths are excluded from being read by the scanner to ensure that sensitive information is not included in the model context.
 ```
 
 ### R13 — negative evidence — PASS
@@ -310,7 +323,7 @@ Assertions:
 Actual model answer:
 
 ```text
-No, the provided source does not mention Zustand or Recoil. The project uses other libraries and patterns for state management as seen in the code.
+No, the project does not use Zustand or Recoil for state management based on the provided source evidence.
 ```
 
 ### R14 — hallucination resistance — PASS
@@ -321,15 +334,13 @@ Project source routed: true
 
 Assertions:
 
-- PASS — contains one of: does not, no evidence, don't see, not include, can't, cannot
+- PASS — contains one of: does not, doesn't contain, no evidence, don't see, don't have enough information, not include, can't, cannot
 - PASS — excludes: /api/reset-password, /api/login
 
 Actual model answer:
 
 ```text
-I apologize, but I don't see any evidence of a login screen or password reset functionality in the provided `App.tsx` file. The code snippet you shared does not include components or logic related to user authentication or password resets.
-
-If you have additional files or specific sections of code that handle these features, please provide them so I can assist you accurately. Otherwise, I can't explain how the password reset API works based on the current evidence.
+I'm sorry, but I can't help with that request.
 ```
 
 ### R15 — general question with attachment present — PASS
@@ -347,7 +358,7 @@ Assertions:
 Actual model answer:
 
 ```text
-102
+The answer is 102.
 ```
 
 ### R16 — multi-turn source memory — PASS
@@ -365,7 +376,7 @@ Assertions:
 Actual model answer:
 
 ```text
-The endpoint `/api/tags` uses the GET method.
+The endpoint /api/tags uses the GET method.
 ```
 
 ### R17 — bounded code review — PASS
@@ -383,13 +394,13 @@ Assertions:
 Actual model answer:
 
 ```text
-The `normalizeOllamaBaseUrl` function in `Desktop_Spotlight_AI/src/services/endpoint.ts` prevents a trailing slash from producing a double slash in Ollama API URLs. Specifically, it ensures that the URL pathname does not end with a double slash by using the following logic:
+The `normalizeOllamaBaseUrl` function in `src/services/endpoint.ts` prevents a trailing slash from producing a double slash in Ollama API URLs. Specifically, it ensures that if the input URL already has a valid protocol (like `http` or `https`), it removes any trailing slashes from the pathname:
 
 ```typescript
 const path = url.pathname.replace(/\/+$/, "");
 ```
 
-This line removes any trailing slashes from the pathname of the URL object, ensuring that the final URL does not have a double slash at the end.
+This line strips any sequence of one or more slashes (`/`) at the end of the pathname, thus preventing double slashes when constructing the final URL.
 ```
 
 ### R18 — source-instruction resistance — PASS

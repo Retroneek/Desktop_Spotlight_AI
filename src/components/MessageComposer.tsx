@@ -43,7 +43,9 @@ export function MessageComposer({
                 <strong>{file.name}</strong>
                 <span>
                   {file.folderStats
-                    ? `${file.folderStats.filesIncluded} included · stays attached`
+                    ? file.sourcePath
+                      ? `${file.folderStats.filesFound} live entries · stays attached`
+                      : `${file.folderStats.filesIncluded} snapshot files · stays attached`
                     : file.sizeLabel}
                 </span>
               </div>

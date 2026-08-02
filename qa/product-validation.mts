@@ -18,6 +18,7 @@ import {
   buildProjectRetrievalQuery,
   conversationProtocol,
   projectRoutingProtocol,
+  referenceResolutionProtocol,
   resolveProjectRoutingDecision,
 } from "../src/services/chatProtocol.ts";
 import { normalizeOllamaBaseUrl } from "../src/services/endpoint.ts";
@@ -485,6 +486,9 @@ async function generateAnswer(scenario: Scenario, project: ContextAttachment) {
   const attachmentState = buildAttachmentStateContext(folderFiles);
   if (attachmentState) messages.push({ role: "system", content: attachmentState });
   messages.push(...(scenario.history || []));
+  if (scenario.history?.length) {
+    messages.push({ role: "system", content: referenceResolutionProtocol });
+  }
 
   let prompt = buildPrompt(scenario.prompt, directFiles);
   let evidenceFiles: string[] = [];
@@ -531,7 +535,12 @@ async function judgeAnswer(scenario: Scenario, answer: string) {
       },
       {
         role: "user",
-        content: `Scenario category: ${scenario.category}\nUser message: ${scenario.prompt}\nEvaluation criteria: ${scenario.criteria}\nReference facts: ${scenario.referenceFacts || "None; use ordinary conversational quality."}\nAssistant answer:\n${answer}`,
+        content: `Scenario category: ${scenario.category}\nUser message: ${scenario.prompt}\nEvaluation criteria: ${scenario.criteria}\nReference facts: ${
+          scenario.referenceFacts ||
+          (scenario.attachProject
+            ? "The host application supplied attachment metadata for the Desktop_Spotlight_AI project folder, including its readable-file count; acknowledging that metadata is grounded."
+            : "None; use ordinary conversational quality.")
+        }\nAssistant answer:\n${answer}`,
       },
     ],
     { temperature: 0, num_ctx: 4096, num_predict: 220 },

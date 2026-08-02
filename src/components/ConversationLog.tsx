@@ -8,15 +8,19 @@ import {
   RegenerateIcon,
 } from "./icons";
 import { MarkdownMessage } from "./MarkdownMessage";
+import { FilesystemProposalParser } from "./FilesystemProposal";
 
 type ConversationLogProps = {
   activeModelName: string;
   canRegenerateAssistantTurnId?: string;
   isGenerating: boolean;
+  generationActivity?: string;
   responseLogRef: RefObject<HTMLDivElement | null>;
   session: ChatSession;
   streamingTextElementRef: RefObject<HTMLParagraphElement | null>;
   streamingTurnId: string | null;
+  folderPath?: string;
+  onFilesystemApplied: () => void;
   onCopyResponse: (content: string) => void;
   onDownloadResponse: (content: string) => void;
   onEditPrompt: (turn: ChatTurn) => void;
@@ -28,10 +32,13 @@ export function ConversationLog({
   activeModelName,
   canRegenerateAssistantTurnId,
   isGenerating,
+  generationActivity,
   responseLogRef,
   session,
   streamingTextElementRef,
   streamingTurnId,
+  folderPath,
+  onFilesystemApplied,
   onCopyResponse,
   onDownloadResponse,
   onEditPrompt,
@@ -43,17 +50,27 @@ export function ConversationLog({
       {isGenerating ? (
         <div className="response-loading-banner">
           <span className="loading-indicator" aria-live="polite">
-            Generating response…
+            {generationActivity || "Generating response..."}
           </span>
         </div>
       ) : null}
       <div ref={responseLogRef} className="response-log" onScroll={onScroll}>
         {session.turns.length ? (
-          session.turns.map((turn) => {
+          session.turns.map((turn, turnIndex) => {
             const isStreamingTurn = turn.id === streamingTurnId;
             const canRegenerateTurn =
               turn.role === "assistant" &&
               canRegenerateAssistantTurnId === turn.id;
+            const proposalFolderPath =
+              turn.role === "assistant"
+                ? session.turns[turnIndex - 1]?.files?.find(
+                    (file) => file.kind === "folder",
+                  )?.sourcePath
+                : undefined;
+            const canApplyProposal =
+              canRegenerateTurn &&
+              Boolean(folderPath) &&
+              proposalFolderPath === folderPath;
 
             return (
               <div key={turn.id} className={`turn-row turn-row-${turn.role}`}>
@@ -78,7 +95,16 @@ export function ConversationLog({
                   {isStreamingTurn ? (
                     <p ref={streamingTextElementRef}>{turn.content}</p>
                   ) : (
-                    <MarkdownMessage content={turn.content} />
+                    <>
+                      <MarkdownMessage content={turn.content} />
+                      {canApplyProposal && proposalFolderPath ? (
+                        <FilesystemProposalParser
+                          content={turn.content}
+                          basePath={proposalFolderPath}
+                          onApplied={onFilesystemApplied}
+                        />
+                      ) : null}
+                    </>
                   )}
 
                   {turn.role === "assistant" ? (

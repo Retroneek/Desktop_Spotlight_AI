@@ -10,6 +10,7 @@
     "qa:v0.1": "node --no-warnings --experimental-strip-types qa/product-validation.mts --mode=v0.1",
     "qa:v0.2": "node --no-warnings --experimental-strip-types qa/product-validation.mts --mode=v0.2",
     "qa:responses": "node --no-warnings --experimental-strip-types qa/response-quality.mts",
+    "qa:live-folder": "node --no-warnings --experimental-strip-types qa/live-folder-validation.mts",
     "preview": "vite preview",
     "tauri": "tauri"
   },
