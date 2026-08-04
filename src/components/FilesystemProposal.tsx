@@ -12,6 +12,8 @@ import {
   parseOrganizationPlanFromContent,
   parseProposedActionsFromContent,
   previewOrganizationPlan,
+  undoFilesystemOperation,
+  writeProjectFile,
 } from "../services/filesystemOps";
 
 type FilesystemProposalProps = {
@@ -32,8 +34,10 @@ function getActionLabel(action: FilesystemAction) {
     case "delete":
       return `Delete “${action.path}”`;
     case "copy":
-      return `Copy “${action.from}” to “${action.to}”`;
-  }
+      return `Copy “${action.from}” to “${action.to}”`;    case "write": {
+      const lines = action.content.split("\n").length;
+      return `Write "${action.path}" (${lines} line${lines === 1 ? "" : "s"})`;
+    }  }
 }
 
 function isContradictoryOrganizationReasoning(
@@ -87,6 +91,9 @@ export function FilesystemProposalCard({
   const [appliedAt, setAppliedAt] = useState(proposal.appliedAt);
   const [resultMessage, setResultMessage] = useState("");
   const [error, setError] = useState("");
+  const [backupPath, setBackupPath] = useState<string | undefined>(undefined);
+  const [isUndoing, setIsUndoing] = useState(false);
+  const [undoMessage, setUndoMessage] = useState("");
 
   useEffect(() => {
     setIsReviewed(proposal.approved);
@@ -95,6 +102,9 @@ export function FilesystemProposalCard({
     setAppliedAt(proposal.appliedAt);
     setResultMessage("");
     setError("");
+    setBackupPath(undefined);
+    setIsUndoing(false);
+    setUndoMessage("");
   }, [basePath, proposal.approved, proposal.appliedAt, proposal.id]);
 
   const applyChanges = useCallback(async () => {
@@ -104,15 +114,36 @@ export function FilesystemProposalCard({
     setError("");
 
     try {
-      const result = await executeFilesystemOperations(basePath, proposal.actions);
-      if (!result.success) {
-        setError(result.message || "The changes could not be applied.");
-        return;
+      // Separate write actions from filesystem actions
+      const writeActions = proposal.actions.filter((a) => a.type === "write") as Array<{ type: "write"; path: string; content: string }>;
+      const otherActions = proposal.actions.filter((a) => a.type !== "write");
+
+      // Apply write actions
+      for (const action of writeActions) {
+        const wr = await writeProjectFile(basePath, action.path, action.content);
+        if (!wr.success) {
+          setError(wr.message || "A file could not be written.");
+          return;
+        }
+      }
+
+      // Apply filesystem actions with backup
+      if (otherActions.length > 0) {
+        const result = await executeFilesystemOperations(basePath, otherActions, true);
+        if (!result.success) {
+          setError(result.message || "The changes could not be applied.");
+          return;
+        }
+        if (result.backupPath) {
+          setBackupPath(result.backupPath);
+        }
+        setResultMessage(result.message);
+      } else if (writeActions.length > 0) {
+        setResultMessage(`Wrote ${writeActions.length} file${writeActions.length === 1 ? "" : "s"}.`);
       }
 
       const completedAt = Date.now();
       setAppliedAt(completedAt);
-      setResultMessage(result.message);
       onApproved?.({
         ...proposal,
         approved: true,
@@ -128,6 +159,23 @@ export function FilesystemProposalCard({
       setIsExecuting(false);
     }
   }, [appliedAt, basePath, isExecuting, isReviewed, onApproved, proposal]);
+
+  const undoChanges = useCallback(async () => {
+    if (!backupPath || isUndoing) return;
+    setIsUndoing(true);
+    setError("");
+    try {
+      const result = await undoFilesystemOperation(basePath, backupPath);
+      setUndoMessage(result.message || "Changes undone.");
+      setBackupPath(undefined);
+    } catch (caughtError) {
+      setError(
+        caughtError instanceof Error ? caughtError.message : "Could not undo changes.",
+      );
+    } finally {
+      setIsUndoing(false);
+    }
+  }, [backupPath, basePath, isUndoing]);
 
   const dismiss = useCallback(() => {
     setIsDismissed(true);
@@ -165,11 +213,24 @@ export function FilesystemProposalCard({
       </ol>
 
       {error ? <p className="filesystem-proposal-status is-error">{error}</p> : null}
+      {undoMessage ? <p className="filesystem-proposal-status is-success">{undoMessage}</p> : null}
       {appliedAt ? (
-        <p className="filesystem-proposal-status is-success">
-          {resultMessage || "Changes applied."} Completed at{" "}
-          {new Date(appliedAt).toLocaleTimeString()}.
-        </p>
+        <div className="filesystem-proposal-applied">
+          <p className="filesystem-proposal-status is-success">
+            {resultMessage || "Changes applied."} Completed at{" "}
+            {new Date(appliedAt).toLocaleTimeString()}.
+          </p>
+          {backupPath ? (
+            <button
+              type="button"
+              className="filesystem-undo-button"
+              disabled={isUndoing}
+              onClick={() => void undoChanges()}
+            >
+              {isUndoing ? "Undoing…" : "Undo deletions"}
+            </button>
+          ) : null}
+        </div>
       ) : null}
 
       {!appliedAt ? (

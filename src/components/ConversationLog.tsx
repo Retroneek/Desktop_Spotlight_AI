@@ -67,9 +67,14 @@ export function ConversationLog({
                     (file) => file.kind === "folder",
                   )?.sourcePath
                 : undefined;
+            // Show the proposal card for any assistant turn whose folder still
+            // matches — not just the most recent regeneratable turn. This lets
+            // the user apply a proposal even after sending follow-up messages.
             const canApplyProposal =
-              canRegenerateTurn &&
+              turn.role === "assistant" &&
+              !isStreamingTurn &&
               Boolean(folderPath) &&
+              Boolean(proposalFolderPath) &&
               proposalFolderPath === folderPath;
 
             return (

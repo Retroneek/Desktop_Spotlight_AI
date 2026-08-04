@@ -170,6 +170,42 @@ const liveWorkspaceTools = [
       },
     },
   },
+  {
+    type: "function",
+    function: {
+      name: "search_workspace_content",
+      description:
+        "Search the text contents of files in the live workspace for one or more keywords. Returns file paths, line numbers, and matching line snippets. Use this when you need to find where a symbol, string, or pattern appears across files.",
+      parameters: {
+        type: "object",
+        properties: {
+          query: { type: "string", description: "One or more space-separated keywords to search for inside file contents." },
+          caseSensitive: { type: "boolean" },
+          cursor: { type: "integer", minimum: 0 },
+          limit: { type: "integer", minimum: 1, maximum: 50 },
+        },
+        required: ["query"],
+        additionalProperties: false,
+      },
+    },
+  },
+  {
+    type: "function",
+    function: {
+      name: "write_workspace_file",
+      description:
+        "Write or create a text file in the live workspace. The entire file content must be provided. Parent directories are created automatically. Use only when the user explicitly asks to create or update a file.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string", description: "Exact relative path for the file to write." },
+          content: { type: "string", description: "Complete text content to write to the file." },
+        },
+        required: ["path", "content"],
+        additionalProperties: false,
+      },
+    },
+  },
 ] as const;
 
 export type ProjectFileCandidate = {
@@ -544,7 +580,7 @@ export function useOllama(baseUrl = DEFAULT_OLLAMA_BASE_URL) {
       let successfulToolCallCount = 0;
 
       try {
-        for (let round = 0; round < 8; round += 1) {
+        for (let round = 0; round < 5; round += 1) {
           const response = await ollamaFetch(`${normalizedBaseUrl}/api/chat`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -575,18 +611,21 @@ export function useOllama(baseUrl = DEFAULT_OLLAMA_BASE_URL) {
             : [];
 
           if (!toolCalls.length) {
-            if (toolCallCount === 0 || successfulToolCallCount === 0) {
+            // Model finished — no more tool calls.
+            // If content is present, accept it as the final answer regardless
+            // of whether any tools were called (the model may have had enough
+            // context from the folder tree already in the prompt).
+            if (content) {
+              onChunk(content);
+              return content;
+            }
+            // Empty response with no tools used at all = model doesn't support tools
+            if (toolCallCount === 0) {
               throw new Error(
-                toolCallCount === 0
-                  ? "The selected model did not use the live workspace tools."
-                  : "The live workspace could not be inspected successfully.",
+                "The selected model did not use the live workspace tools.",
               );
             }
-            if (!content) {
-              throw new Error("Ollama returned no answer from the live workspace.");
-            }
-            onChunk(content);
-            return content;
+            throw new Error("Ollama returned no answer from the live workspace.");
           }
 
           messages.push({
@@ -596,7 +635,7 @@ export function useOllama(baseUrl = DEFAULT_OLLAMA_BASE_URL) {
           });
           for (const toolCall of toolCalls) {
             toolCallCount += 1;
-            if (toolCallCount > 24) {
+            if (toolCallCount > 16) {
               throw new Error("The live workspace inspection requested too many tool calls.");
             }
             const toolName = toolCall.function?.name?.trim() ?? "";
@@ -606,8 +645,8 @@ export function useOllama(baseUrl = DEFAULT_OLLAMA_BASE_URL) {
                 search_workspace_paths: "Searching the live folder...",
                 inspect_workspace_entries: "Inspecting current file metadata...",
                 read_workspace_text_files: "Reading current files in a batch...",
-                read_workspace_text_chunk: "Reading the next file section...",
-              }[toolName] ?? "Inspecting the live workspace...",
+                read_workspace_text_chunk: "Reading the next file section...",                search_workspace_content: "Searching file contents...",
+                write_workspace_file: "Writing file...",              }[toolName] ?? "Inspecting the live workspace...",
             );
             const toolArguments = normalizeToolArguments(
               toolCall.function?.arguments,

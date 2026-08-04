@@ -116,3 +116,48 @@ export function refreshLiveFolder(basePath: string) {
     basePath,
   });
 }
+
+export type ContentSearchMatch = {
+  line: number;
+  snippet: string;
+};
+
+export type ContentSearchResult = {
+  path: string;
+  size: number;
+  matches: ContentSearchMatch[];
+};
+
+export type ContentSearchPage = {
+  results: ContentSearchResult[];
+  nextCursor?: number;
+  totalFilesSearched: number;
+};
+
+export function searchLiveFolderContents(
+  basePath: string,
+  query: string,
+  caseSensitive = false,
+  cursor = 0,
+  limit = 20,
+) {
+  return invoke<ContentSearchPage>("search_project_file_contents", {
+    basePath,
+    query,
+    caseSensitive,
+    cursor,
+    limit,
+  });
+}
+
+export function writeWorkspaceFile(
+  basePath: string,
+  path: string,
+  content: string,
+) {
+  return invoke<{ success: boolean; message: string }>("write_project_file", {
+    basePath,
+    path,
+    content,
+  });
+}

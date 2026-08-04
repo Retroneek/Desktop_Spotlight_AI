@@ -124,11 +124,18 @@ export function buildGenerationOptions(
   files: AttachedFile[],
 ): OllamaChatOptions {
   if (files.some((file) => file.kind === "folder")) {
+    // If the folder has no readable text files (PDFs, images, etc.)
+    // use a smaller context window — only filenames and metadata are in the prompt.
+    const hasReadableFiles = files.some(
+      (file) =>
+        file.kind === "folder" &&
+        (file.folderStats?.filesIncluded ?? 0) > 0,
+    );
     return {
       temperature: 0,
       top_p: 0.85,
       repeat_penalty: 1.05,
-      num_ctx: 16384,
+      num_ctx: hasReadableFiles ? 16384 : 8192,
       num_predict: 1200,
     };
   }

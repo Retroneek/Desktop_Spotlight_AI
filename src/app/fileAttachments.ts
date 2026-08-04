@@ -2,10 +2,21 @@ import type { DragEvent } from "react";
 import { formatFileSize } from "../services/contextBuilder";
 import type { AttachedFile } from "./types";
 
+const CODE_AND_DATA_EXTENSIONS = new Set([
+  ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+  ".py", ".pyi", ".rs", ".go", ".java", ".kt",
+  ".c", ".cpp", ".h", ".hpp", ".cs", ".swift",
+  ".rb", ".php", ".sh", ".ps1", ".bat", ".cmd",
+  ".sql", ".html", ".htm", ".css", ".scss", ".less",
+  ".json", ".jsonc", ".yaml", ".yml", ".toml", ".xml",
+  ".csv", ".tsv", ".log", ".conf", ".ini", ".env.example",
+  ".gitignore", ".editorconfig", ".lock",
+]);
+
 function isSupportedTextFile(file: File) {
   const lowerName = file.name.toLowerCase();
 
-  return (
+  if (
     file.type === "text/plain" ||
     file.type === "text/markdown" ||
     file.type === "text/rtf" ||
@@ -16,7 +27,11 @@ function isSupportedTextFile(file: File) {
     lowerName.endsWith(".md") ||
     lowerName.endsWith(".rtf") ||
     lowerName.endsWith(".docx")
-  );
+  ) {
+    return true;
+  }
+
+  return [...CODE_AND_DATA_EXTENSIONS].some((ext) => lowerName.endsWith(ext));
 }
 
 function getFileTypeLabel(file: File) {
@@ -24,8 +39,26 @@ function getFileTypeLabel(file: File) {
 
   if (lowerName.endsWith(".docx")) return "Word document";
   if (lowerName.endsWith(".rtf")) return "rich text";
-  if (lowerName.endsWith(".md")) return "text/markdown";
-  return file.type || "file";
+  if (lowerName.endsWith(".md")) return "Markdown";
+  if (lowerName.endsWith(".ts") || lowerName.endsWith(".tsx")) return "TypeScript";
+  if (lowerName.endsWith(".js") || lowerName.endsWith(".jsx")) return "JavaScript";
+  if (lowerName.endsWith(".py") || lowerName.endsWith(".pyi")) return "Python";
+  if (lowerName.endsWith(".rs")) return "Rust";
+  if (lowerName.endsWith(".go")) return "Go";
+  if (lowerName.endsWith(".java") || lowerName.endsWith(".kt")) return "Java/Kotlin";
+  if (lowerName.endsWith(".cs")) return "C#";
+  if (lowerName.endsWith(".cpp") || lowerName.endsWith(".c") || lowerName.endsWith(".h")) return "C/C++";
+  if (lowerName.endsWith(".html") || lowerName.endsWith(".htm")) return "HTML";
+  if (lowerName.endsWith(".css") || lowerName.endsWith(".scss") || lowerName.endsWith(".less")) return "CSS";
+  if (lowerName.endsWith(".json") || lowerName.endsWith(".jsonc")) return "JSON";
+  if (lowerName.endsWith(".yaml") || lowerName.endsWith(".yml")) return "YAML";
+  if (lowerName.endsWith(".toml")) return "TOML";
+  if (lowerName.endsWith(".xml")) return "XML";
+  if (lowerName.endsWith(".csv") || lowerName.endsWith(".tsv")) return "CSV";
+  if (lowerName.endsWith(".sql")) return "SQL";
+  if (lowerName.endsWith(".sh") || lowerName.endsWith(".ps1") || lowerName.endsWith(".bat")) return "Script";
+  if (lowerName.endsWith(".log")) return "Log file";
+  return file.type || "text file";
 }
 
 function cleanExtractedText(text: string) {

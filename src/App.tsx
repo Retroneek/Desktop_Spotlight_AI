@@ -27,7 +27,7 @@ import {
   getModelPreferenceScore,
 } from "./services/models";
 import { useOllama } from "./services/ollama";
-import { buildProjectRetrievalQuery } from "./services/chatProtocol";
+import { buildProjectRetrievalQuery, quickRouteProject } from "./services/chatProtocol";
 import { normalizeOllamaBaseUrl } from "./services/endpoint";
 import {
   browseLiveFolder,
@@ -36,6 +36,8 @@ import {
   readLiveFolderFiles,
   refreshLiveFolder,
   searchLiveFolder,
+  searchLiveFolderContents,
+  writeWorkspaceFile,
 } from "./services/liveFolder";
 import {
   composerLayout,
@@ -1148,13 +1150,12 @@ function App() {
       let usedLiveWorkspaceAgent = false;
 
       try {
-        shouldUseProjectContext = folderFiles.length
-          ? await shouldReadProject(
-              directPrompt,
-              activeModelName,
-              recentContextHistory,
-            )
-          : false;
+        shouldUseProjectContext = await (() => {
+            if (!folderFiles.length) return Promise.resolve(false);
+            const quick = quickRouteProject(directPrompt, true);
+            if (quick !== null) return Promise.resolve(quick);
+            return shouldReadProject(directPrompt, activeModelName, recentContextHistory);
+          })();
         let requestMessages = chatMessages;
 
         if (shouldUseProjectContext) {
@@ -1274,6 +1275,29 @@ function App() {
                         ),
                       );
                       return `<live_file_chunk path=${JSON.stringify(chunk.path)} offset=${chunk.offset} nextOffset=${chunk.nextOffset ?? "complete"} totalBytes=${chunk.totalBytes}>\n${chunk.content}\n</live_file_chunk>`;
+                    }
+                    case "search_workspace_content": {
+                      const query = workspaceToolString(argumentsValue, "query");
+                      if (!query) throw new Error("No query was provided.");
+                      const sensitive = argumentsValue["caseSensitive"] === true;
+                      const results = await searchLiveFolderContents(
+                        basePath,
+                        query,
+                        sensitive,
+                        workspaceToolInteger(argumentsValue, "cursor", 0, 1_000_000_000),
+                        workspaceToolInteger(argumentsValue, "limit", 20, 50),
+                      );
+                      return JSON.stringify(results);
+                    }
+                    case "write_workspace_file": {
+                      const filePath = workspaceToolString(argumentsValue, "path");
+                      const fileContent = typeof argumentsValue["content"] === "string"
+                        ? (argumentsValue["content"] as string)
+                        : "";
+                      if (!filePath) throw new Error("No path was provided.");
+                      if (!fileContent) throw new Error("No content was provided.");
+                      const wr = await writeWorkspaceFile(basePath, filePath, fileContent);
+                      return JSON.stringify(wr);
                     }
                     default:
                       throw new Error(
@@ -1726,7 +1750,7 @@ function App() {
             ref={fileInputRef}
             type="file"
             multiple
-            accept=".txt,.md,.rtf,.docx,text/plain,text/markdown,text/rtf,application/rtf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            accept=".txt,.md,.rtf,.docx,.ts,.tsx,.js,.jsx,.mjs,.py,.pyi,.rs,.go,.java,.kt,.c,.cpp,.h,.cs,.swift,.rb,.php,.sh,.ps1,.sql,.html,.css,.scss,.json,.yaml,.yml,.toml,.xml,.csv,.tsv,.log,.conf,.ini,text/plain,text/markdown,text/rtf,application/rtf,application/vnd.openxmlformats-officedocument.wordprocessingml.document"
             onChange={(event) => {
               void addFiles(
                 event.currentTarget.files ?? [],

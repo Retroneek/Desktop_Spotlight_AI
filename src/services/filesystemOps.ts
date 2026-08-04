@@ -9,11 +9,23 @@ import type {
 export type FilesystemOperationResult = {
   success: boolean;
   message: string;
+  backupPath?: string;
+};
+
+export type WriteFileResult = {
+  success: boolean;
+  message: string;
+};
+
+export type RenameWithReferencesResult = {
+  success: boolean;
+  message: string;
 };
 
 const maximumProposedActions = 250;
 const maximumPathLength = 500;
 const spotlightCommandBlockPattern = /```spotlight\s*([\s\S]*?)```/gi;
+const writeFileBlockPattern = /```write-file\s+"([^"\n]+)"\n([\s\S]*?)```/gi;
 const legacyJsonBlockPattern = /```json\s*([\s\S]*?)```/gi;
 const quotedCommandValue = `"(?:[^"\\\\]|\\\\.)*"`;
 
@@ -63,6 +75,8 @@ function isFilesystemAction(value: unknown): value is FilesystemAction {
     case "createFolder":
     case "delete":
       return isSafeRelativePath(value.path);
+    case "write":
+      return isSafeRelativePath(value.path) && typeof value.content === "string";
     default:
       return false;
   }
@@ -89,6 +103,17 @@ function commandLines(block: string) {
 
 function parseOrganizationCommandBlock(block: string): OrganizationPlan | null {
   const lines = commandLines(block);
+
+  // Optional subfolder directive: subfolder "path/to/dir"
+  const subfolderLine = lines.find((line) => /^subfolder\s+/i.test(line));
+  let subfolderPath: string | undefined;
+  if (subfolderLine) {
+    const match = subfolderLine.match(/^subfolder\s+"([^"]+)"$/i);
+    if (!match) return null;
+    subfolderPath = match[1];
+    if (!isSafeRelativePath(subfolderPath)) return null;
+  }
+
   const organizationLines = lines.filter((line) => /^(?:organize|flatten)\s+/i.test(line));
   if (organizationLines.length !== 1) return null;
 
@@ -125,6 +150,7 @@ function parseOrganizationCommandBlock(block: string): OrganizationPlan | null {
   let hasCleanupDirective = false;
   for (const line of lines) {
     if (line === organizationLines[0]) continue;
+    if (subfolderLine && line === subfolderLine) continue;
     const normalized = line.toLowerCase().replace(/[_\s]+/g, "-");
     if (
       normalized === "cleanup-empty-folders" ||
@@ -147,7 +173,8 @@ function parseOrganizationCommandBlock(block: string): OrganizationPlan | null {
 
   return {
     groupBy: [...groupBy],
-    scope: "allFiles",
+    scope: subfolderPath ? "subfolder" : "allFiles",
+    ...(subfolderPath ? { subfolderPath } : {}),
     reasoning: "",
     removeEmptyFolders,
   };
@@ -215,10 +242,12 @@ function parseActionCommandBlock(block: string): FilesystemProposal | null {
 export async function executeFilesystemOperations(
   basePath: string,
   actions: FilesystemAction[],
+  createBackup = false,
 ): Promise<FilesystemOperationResult> {
   return invoke("execute_filesystem_operations", {
     basePath,
     actions,
+    createBackup,
   });
 }
 
@@ -295,6 +324,24 @@ export function parseOrganizationPlanFromContent(
 export function parseProposedActionsFromContent(
   content: string,
 ): FilesystemProposal | null {
+  // Check for write-file blocks first
+  const writeActions: FilesystemAction[] = [];
+  for (const match of content.matchAll(writeFileBlockPattern)) {
+    const path = match[1].trim();
+    const fileContent = match[2];
+    if (isSafeRelativePath(path) && typeof fileContent === "string") {
+      writeActions.push({ type: "write", path, content: fileContent });
+    }
+  }
+  if (writeActions.length > 0) {
+    return {
+      id: createStableProposalId(writeActions.map((a) => (a as { type: string; path: string }).path).join("|")),
+      actions: writeActions,
+      reasoning: "",
+      approved: false,
+    };
+  }
+
   for (const match of content.matchAll(spotlightCommandBlockPattern)) {
     const proposal = parseActionCommandBlock(match[1]);
     if (proposal) return proposal;
@@ -331,4 +378,27 @@ export function parseProposedActionsFromContent(
   }
 
   return null;
+}
+
+export async function writeProjectFile(
+  basePath: string,
+  path: string,
+  content: string,
+): Promise<WriteFileResult> {
+  return invoke("write_project_file", { basePath, path, content });
+}
+
+export async function undoFilesystemOperation(
+  basePath: string,
+  backupPath: string,
+): Promise<FilesystemOperationResult> {
+  return invoke("undo_filesystem_operation", { basePath, backupPath });
+}
+
+export async function renameWithReferences(
+  basePath: string,
+  path: string,
+  newName: string,
+): Promise<RenameWithReferencesResult> {
+  return invoke("rename_with_references", { basePath, path, newName });
 }

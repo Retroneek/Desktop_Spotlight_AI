@@ -19,12 +19,14 @@ const MAX_SELECTIVE_READ_FILES: usize = 8;
 const MAX_SELECTIVE_READ_CHARACTERS: usize = 60_000;
 const MAX_LIVE_FOLDER_ENTRIES: usize = 2_000;
 const MAX_TREE_ENTRIES: usize = 400;
-// Keep large folder reviews practical while still placing a firm ceiling on a
-// single approval. A typical music library can easily contain more than 50
-// tracks, and every move must remain explicit and reviewable.
 const MAX_FILESYSTEM_OPERATIONS: usize = 250;
 const ORGANIZATION_BATCH_SIZE: usize = 200;
 const ORGANIZATION_PREVIEW_SIZE: usize = 30;
+const MAX_CONTENT_SEARCH_RESULTS: usize = 50;
+const MAX_CONTENT_SEARCH_FILE_SIZE: u64 = 256 * 1024;
+const MAX_CONTENT_SEARCH_MATCHES_PER_FILE: usize = 5;
+const MAX_WRITE_FILE_SIZE: usize = 512 * 1024;
+const BACKUP_DIR_NAME: &str = ".spotlight-backup";
 
 #[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
@@ -46,6 +48,8 @@ pub struct OrganizationPlan {
     group_by: Vec<OrganizationGrouping>,
     scope: OrganizationScope,
     #[serde(default)]
+    subfolder_path: Option<String>,
+    #[serde(default)]
     remove_empty_folders: bool,
 }
 
@@ -61,6 +65,7 @@ enum OrganizationGrouping {
 #[serde(rename_all = "camelCase")]
 enum OrganizationScope {
     AllFiles,
+    Subfolder,
 }
 
 #[derive(Serialize)]
@@ -81,6 +86,8 @@ pub struct OrganizationPreview {
 pub struct OperationResult {
     success: bool,
     message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    backup_path: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -911,6 +918,7 @@ fn execute_prepared_action(action: PreparedAction) -> Result<(), String> {
 pub fn execute_filesystem_operations(
     base_path: String,
     actions: Vec<FilesystemAction>,
+    create_backup: Option<bool>,
 ) -> Result<OperationResult, String> {
     if actions.is_empty() {
         return Err("No file changes were provided".to_string());
@@ -957,6 +965,30 @@ pub fn execute_filesystem_operations(
         );
     }
 
+    // Optionally back up files that will be deleted before executing.
+    let backup_path = if create_backup.unwrap_or(false) {
+        let backup_dir = build_backup_dir_path(&base);
+        let mut backed_up = false;
+        for action in &prepared {
+            if let PreparedAction::Delete { path } = action {
+                if path.exists() {
+                    backup_file_to_dir(&base, path, &backup_dir)?;
+                    backed_up = true;
+                }
+            }
+        }
+        if backed_up {
+            backup_dir
+                .strip_prefix(&base)
+                .ok()
+                .map(|p| p.to_string_lossy().replace('\\', "/"))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
     for (index, action) in prepared.into_iter().enumerate() {
         execute_prepared_action(action)
             .map_err(|error| format!("Change {} failed: {error}", index + 1))?;
@@ -968,6 +1000,7 @@ pub fn execute_filesystem_operations(
             "Applied {action_count} file {}.",
             if action_count == 1 { "change" } else { "changes" }
         ),
+        backup_path,
     })
 }
 
@@ -1090,9 +1123,12 @@ fn organization_alphabet_bucket(path: &Path) -> String {
     }
 }
 
-fn organization_destination(file: &OrganizationFile, plan: &OrganizationPlan) -> String {
+fn organization_destination(file: &OrganizationFile, plan: &OrganizationPlan, prefix: &str) -> String {
     let source = Path::new(&file.relative_path);
     let mut destination = PathBuf::new();
+    if !prefix.is_empty() {
+        destination.push(prefix);
+    }
     for grouping in &plan.group_by {
         match grouping {
             OrganizationGrouping::FileType => destination.push(organization_file_type(source)),
@@ -1109,9 +1145,6 @@ fn organization_destination(file: &OrganizationFile, plan: &OrganizationPlan) ->
 }
 
 fn build_organization_state(base: &Path, plan: &OrganizationPlan) -> Result<OrganizationState, String> {
-    if plan.scope != OrganizationScope::AllFiles {
-        return Err("Only complete-folder organization is supported".to_string());
-    }
     if plan.group_by.is_empty() {
         return Err("The organization plan needs at least one grouping level".to_string());
     }
@@ -1123,12 +1156,28 @@ fn build_organization_state(base: &Path, plan: &OrganizationPlan) -> Result<Orga
         return Err("Moving files to the main folder cannot be combined with another hierarchy".to_string());
     }
 
+    let (scan_root, scan_prefix) = match plan.scope {
+        OrganizationScope::AllFiles => (base.to_path_buf(), String::new()),
+        OrganizationScope::Subfolder => {
+            let subfolder = plan.subfolder_path.as_deref()
+                .ok_or_else(|| "Subfolder path is required for subfolder scope".to_string())?;
+            let path = resolve_existing_path(base, subfolder, "Subfolder")?;
+            if !path.is_dir() {
+                return Err("The subfolder path is not a directory".to_string());
+            }
+            let normalized = validate_relative_path(subfolder, "Subfolder")?
+                .to_string_lossy()
+                .replace('\\', "/");
+            (path, normalized)
+        }
+    };
+
     let mut files = Vec::new();
     let mut directories = Vec::new();
     let mut cleanup_blockers = Vec::new();
     collect_organization_files(
         base,
-        base,
+        &scan_root,
         &mut files,
         &mut directories,
         &mut cleanup_blockers,
@@ -1160,7 +1209,7 @@ fn build_organization_state(base: &Path, plan: &OrganizationPlan) -> Result<Orga
         *type_breakdown
             .entry(organization_file_type(Path::new(&file.relative_path)))
             .or_insert(0) += 1;
-        let destination = organization_destination(file, plan);
+        let destination = organization_destination(file, plan, &scan_prefix);
         if destination.eq_ignore_ascii_case(&file.relative_path) {
             unchanged_files += 1;
             continue;
@@ -1340,6 +1389,7 @@ pub fn execute_organization_plan(
     Ok(OperationResult {
         success: true,
         message: format!("{move_message}{cleanup_message}{skipped_message}"),
+        backup_path: None,
     })
 }
 
@@ -2160,6 +2210,519 @@ fn format_file_tree(paths: &[String], root_name: &str) -> String {
     lines.join("\n")
 }
 
+// ─── Backup helpers ──────────────────────────────────────────────────────────
+
+fn build_backup_dir_path(base: &Path) -> PathBuf {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    base.join(BACKUP_DIR_NAME).join(timestamp.to_string())
+}
+
+fn backup_file_to_dir(base: &Path, file_path: &Path, backup_dir: &Path) -> Result<(), String> {
+    let relative = file_path
+        .strip_prefix(base)
+        .map_err(|_| "Could not compute backup path".to_string())?;
+    let backup_target = backup_dir.join(relative);
+
+    if let Some(parent) = backup_target.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Could not create backup directory: {e}"))?;
+    }
+
+    if file_path.is_dir() {
+        copy_directory(file_path, &backup_target)
+    } else {
+        fs::copy(file_path, &backup_target)
+            .map(|_| ())
+            .map_err(|e| format!("Could not back up {}: {e}", file_path.display()))
+    }
+}
+
+fn restore_from_backup(
+    base: &Path,
+    backup_root: &Path,
+    current_dir: &Path,
+    restored_count: &mut usize,
+) -> Result<(), String> {
+    for entry in fs::read_dir(current_dir)
+        .map_err(|e| format!("Could not read backup directory: {e}"))?
+    {
+        let entry = entry.map_err(|e| format!("Could not read backup entry: {e}"))?;
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(backup_root)
+            .map_err(|_| "Backup entry escaped backup directory".to_string())?;
+        let restore_target = base.join(relative);
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|e| format!("Could not inspect backup entry: {e}"))?;
+
+        if metadata.is_dir() {
+            restore_from_backup(base, backup_root, &path, restored_count)?;
+        } else if metadata.is_file() {
+            if let Some(parent) = restore_target.parent() {
+                fs::create_dir_all(parent)
+                    .map_err(|e| format!("Could not create restore directory: {e}"))?;
+            }
+            fs::copy(&path, &restore_target)
+                .map_err(|e| format!("Could not restore {}: {e}", relative.display()))?;
+            *restored_count += 1;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn undo_filesystem_operation(
+    base_path: String,
+    backup_path: String,
+) -> Result<OperationResult, String> {
+    let base = open_workspace_base(&base_path)?;
+    let backup_relative = validate_relative_path(&backup_path, "Backup path")?;
+    let backup_dir = base.join(&backup_relative);
+
+    if !backup_dir.is_dir() {
+        return Err("Backup directory not found".to_string());
+    }
+
+    // Ensure backup dir is inside .spotlight-backup
+    let first_component = backup_relative
+        .components()
+        .next()
+        .map(|c| c.as_os_str().to_string_lossy().to_string())
+        .unwrap_or_default();
+    if first_component != BACKUP_DIR_NAME {
+        return Err("Invalid backup path".to_string());
+    }
+
+    let canonical_backup = fs::canonicalize(&backup_dir)
+        .map_err(|e| format!("Could not verify backup path: {e}"))?;
+    if !canonical_backup.starts_with(&base) {
+        return Err("Backup path must stay inside the selected folder".to_string());
+    }
+
+    let mut restored_count = 0usize;
+    restore_from_backup(&base, &backup_dir, &backup_dir, &mut restored_count)?;
+    let _ = fs::remove_dir_all(&backup_dir);
+
+    Ok(OperationResult {
+        success: true,
+        message: format!(
+            "Restored {} file{}.",
+            restored_count,
+            if restored_count == 1 { "" } else { "s" }
+        ),
+        backup_path: None,
+    })
+}
+
+// ─── Full-text content search ────────────────────────────────────────────────
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentSearchMatch {
+    line: usize,
+    snippet: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentSearchResult {
+    path: String,
+    size: u64,
+    matches: Vec<ContentSearchMatch>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ContentSearchPage {
+    results: Vec<ContentSearchResult>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    next_cursor: Option<usize>,
+    total_files_searched: usize,
+}
+
+fn search_file_for_terms(
+    path: &Path,
+    query_terms: &[String],
+    case_sensitive: bool,
+) -> Option<Vec<ContentSearchMatch>> {
+    let content = fs::read_to_string(path).ok()?;
+    let mut matches = Vec::new();
+
+    for (line_idx, line) in content.lines().enumerate() {
+        let searchable = if case_sensitive {
+            line.to_string()
+        } else {
+            line.to_lowercase()
+        };
+
+        if query_terms.iter().all(|term| searchable.contains(term.as_str())) {
+            let snippet = line.trim().chars().take(200).collect::<String>();
+            matches.push(ContentSearchMatch {
+                line: line_idx + 1,
+                snippet,
+            });
+            if matches.len() >= MAX_CONTENT_SEARCH_MATCHES_PER_FILE {
+                break;
+            }
+        }
+    }
+
+    if matches.is_empty() { None } else { Some(matches) }
+}
+
+fn collect_content_search(
+    base: &Path,
+    directory: &Path,
+    query_terms: &[String],
+    case_sensitive: bool,
+    results: &mut Vec<ContentSearchResult>,
+) -> Result<(), String> {
+    if results.len() >= MAX_CONTENT_SEARCH_RESULTS {
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(directory)
+        .map_err(|e| format!("Could not read {}: {e}", directory.display()))?
+    {
+        let entry = entry.map_err(|e| format!("Could not read entry: {e}"))?;
+        let path = entry.path();
+        let relative = path
+            .strip_prefix(base)
+            .map_err(|_| "A result escaped the selected folder".to_string())?;
+
+        if is_ignored_workspace_path(relative) {
+            continue;
+        }
+
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|e| format!("Could not inspect {}: {e}", path.display()))?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+
+        if metadata.is_dir() {
+            collect_content_search(base, &path, query_terms, case_sensitive, results)?;
+            continue;
+        }
+
+        if !metadata.is_file()
+            || metadata.len() > MAX_CONTENT_SEARCH_FILE_SIZE
+            || !is_supported_project_file(&path)
+        {
+            continue;
+        }
+
+        if results.len() >= MAX_CONTENT_SEARCH_RESULTS {
+            break;
+        }
+
+        let normalized = relative.to_string_lossy().replace('\\', "/");
+        if let Some(matches) = search_file_for_terms(&path, query_terms, case_sensitive) {
+            results.push(ContentSearchResult {
+                path: normalized,
+                size: metadata.len(),
+                matches,
+            });
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn search_project_file_contents(
+    base_path: String,
+    query: String,
+    case_sensitive: Option<bool>,
+    cursor: Option<usize>,
+    limit: Option<usize>,
+) -> Result<ContentSearchPage, String> {
+    let base = open_workspace_base(&base_path)?;
+    let sensitive = case_sensitive.unwrap_or(false);
+    let query_terms: Vec<String> = query
+        .split_whitespace()
+        .map(|term| if sensitive { term.to_string() } else { term.to_lowercase() })
+        .filter(|term| !term.is_empty())
+        .collect();
+
+    if query_terms.is_empty() {
+        return Err("Search query cannot be empty".to_string());
+    }
+
+    let mut all_results = Vec::new();
+    collect_content_search(&base, &base, &query_terms, sensitive, &mut all_results)?;
+
+    let total = all_results.len();
+    let start = cursor.unwrap_or(0);
+    if start > total {
+        return Err("The search cursor is no longer valid; start again at cursor 0".to_string());
+    }
+    let page_size = limit.unwrap_or(20).clamp(1, 50);
+    let end = (start + page_size).min(total);
+    let next_cursor = (end < total).then_some(end);
+
+    Ok(ContentSearchPage {
+        results: all_results.into_iter().skip(start).take(page_size).collect(),
+        next_cursor,
+        total_files_searched: total,
+    })
+}
+
+// ─── Write project file ───────────────────────────────────────────────────────
+
+#[tauri::command]
+pub fn write_project_file(
+    base_path: String,
+    path: String,
+    content: String,
+) -> Result<OperationResult, String> {
+    if content.len() > MAX_WRITE_FILE_SIZE {
+        return Err(format!(
+            "File content exceeds the maximum allowed size of {} KB",
+            MAX_WRITE_FILE_SIZE / 1024
+        ));
+    }
+
+    let base = fs::canonicalize(&base_path)
+        .map_err(|e| format!("Could not open the selected folder: {e}"))?;
+    if !base.is_dir() {
+        return Err("The selected project path is not a folder".to_string());
+    }
+
+    let relative = validate_relative_path(&path, "File path")?;
+    let normalized = relative.to_string_lossy().replace('\\', "/");
+
+    if is_ignored_workspace_path(&relative) {
+        return Err(format!("Ignored paths cannot be written: {normalized}"));
+    }
+
+    let file_path = base.join(&relative);
+
+    // Verify the resolved path stays within base by checking the first
+    // existing ancestor.
+    let mut existing_ancestor = file_path.parent()
+        .ok_or_else(|| "Could not determine parent directory".to_string())?;
+    while !path_exists(existing_ancestor) {
+        existing_ancestor = existing_ancestor
+            .parent()
+            .ok_or_else(|| "Could not verify file path".to_string())?;
+    }
+    let canonical_ancestor = fs::canonicalize(existing_ancestor)
+        .map_err(|e| format!("Could not verify file path: {e}"))?;
+    if !canonical_ancestor.starts_with(&base) {
+        return Err("File path must stay inside the selected folder".to_string());
+    }
+
+    let file_exists = path_exists(&file_path);
+
+    if let Some(parent) = file_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Could not create parent directories: {e}"))?;
+    }
+
+    fs::write(&file_path, content.as_bytes())
+        .map_err(|e| format!("Could not write {normalized}: {e}"))?;
+
+    Ok(OperationResult {
+        success: true,
+        message: if file_exists {
+            format!("Updated {normalized}.")
+        } else {
+            format!("Created {normalized}.")
+        },
+        backup_path: None,
+    })
+}
+
+// ─── Reference-aware rename ──────────────────────────────────────────────────
+
+fn update_references_in_folder(
+    base: &Path,
+    directory: &Path,
+    old_relative: &str,
+    new_relative: &str,
+    old_stem: &str,
+    new_stem: &str,
+    skip_file: &Path,
+    updated_files: &mut usize,
+    total_replacements: &mut usize,
+) -> Result<(), String> {
+    for entry in fs::read_dir(directory)
+        .map_err(|e| format!("Could not read directory: {e}"))?
+    {
+        let entry = entry.map_err(|e| format!("Could not read entry: {e}"))?;
+        let path = entry.path();
+
+        if path == skip_file {
+            continue;
+        }
+
+        let relative = path
+            .strip_prefix(base)
+            .map_err(|_| "An entry escaped the selected folder".to_string())?;
+
+        if is_ignored_workspace_path(relative) {
+            continue;
+        }
+
+        let metadata = fs::symlink_metadata(&path)
+            .map_err(|e| format!("Could not inspect {}: {e}", path.display()))?;
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+
+        if metadata.is_dir() {
+            update_references_in_folder(
+                base, &path, old_relative, new_relative, old_stem, new_stem,
+                skip_file, updated_files, total_replacements,
+            )?;
+            continue;
+        }
+
+        if !metadata.is_file()
+            || metadata.len() > MAX_CONTENT_SEARCH_FILE_SIZE
+            || !is_supported_project_file(&path)
+        {
+            continue;
+        }
+
+        let content = match fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(_) => continue,
+        };
+
+        let mut new_content = content.clone();
+        let mut count = 0usize;
+
+        // Replace full relative path references
+        if new_content.contains(old_relative) {
+            count += new_content.matches(old_relative).count();
+            new_content = new_content.replace(old_relative, new_relative);
+        }
+
+        // Replace stem references in import/require/use contexts (only when stem changed)
+        if old_stem != new_stem {
+            // Match stem at end of quoted path (e.g. "./old-name" or "../path/old-name")
+            let old_quoted_end = format!("{old_stem}\"");
+            let new_quoted_end = format!("{new_stem}\"");
+            let old_apos_end = format!("{old_stem}'");
+            let new_apos_end = format!("{new_stem}'");
+
+            let c1 = new_content.matches(&old_quoted_end).count();
+            let c2 = new_content.matches(&old_apos_end).count();
+            if c1 + c2 > 0 {
+                new_content = new_content
+                    .replace(&old_quoted_end, &new_quoted_end)
+                    .replace(&old_apos_end, &new_apos_end);
+                count += c1 + c2;
+            }
+        }
+
+        if count > 0 {
+            fs::write(&path, new_content.as_bytes())
+                .map_err(|e| format!("Could not update {}: {e}", path.display()))?;
+            *updated_files += 1;
+            *total_replacements += count;
+        }
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub fn rename_with_references(
+    base_path: String,
+    path: String,
+    new_name: String,
+) -> Result<OperationResult, String> {
+    let base = fs::canonicalize(&base_path)
+        .map_err(|e| format!("Could not open the selected folder: {e}"))?;
+    if !base.is_dir() {
+        return Err("The selected project path is not a folder".to_string());
+    }
+
+    let source = resolve_existing_path(&base, &path, "File path")?;
+    let new_name_validated = validate_file_name(&new_name)?;
+    let destination = source
+        .parent()
+        .ok_or_else(|| "Could not determine rename destination".to_string())?
+        .join(&new_name_validated);
+
+    if path_exists(&destination) {
+        return Err(format!(
+            "A file named \"{}\" already exists in that location",
+            new_name
+        ));
+    }
+
+    // Compute relative paths for reference replacement
+    let old_relative = source
+        .strip_prefix(&base)
+        .map_err(|_| "Source path is not inside the selected folder".to_string())?
+        .to_string_lossy()
+        .replace('\\', "/");
+
+    let new_relative = destination
+        .strip_prefix(&base)
+        .map_err(|_| "Destination path is not inside the selected folder".to_string())?
+        .to_string_lossy()
+        .replace('\\', "/");
+
+    let old_stem = source
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    let new_stem = destination
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+
+    // Update references in all text files before renaming
+    let mut updated_files = 0usize;
+    let mut total_replacements = 0usize;
+    update_references_in_folder(
+        &base,
+        &base,
+        &old_relative,
+        &new_relative,
+        &old_stem,
+        &new_stem,
+        &source,
+        &mut updated_files,
+        &mut total_replacements,
+    )?;
+
+    // Perform the rename
+    if let Some(parent) = destination.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Could not create parent directories: {e}"))?;
+    }
+    fs::rename(&source, &destination)
+        .map_err(|e| format!("Could not rename file: {e}"))?;
+
+    let ref_message = if updated_files > 0 {
+        format!(
+            " Updated {} reference{} in {} file{}.",
+            total_replacements,
+            if total_replacements == 1 { "" } else { "s" },
+            updated_files,
+            if updated_files == 1 { "" } else { "s" },
+        )
+    } else {
+        String::new()
+    };
+
+    Ok(OperationResult {
+        success: true,
+        message: format!("Renamed to \"{new_name}\".{ref_message}"),
+        backup_path: None,
+    })
+}
+
 #[cfg(test)]
 mod filesystem_operation_tests {
     use super::*;
@@ -2179,7 +2742,7 @@ mod filesystem_operation_tests {
     }
 
     fn apply(base: &Path, action: FilesystemAction) {
-        execute_filesystem_operations(base.to_string_lossy().into_owned(), vec![action])
+        execute_filesystem_operations(base.to_string_lossy().into_owned(), vec![action], None)
             .expect("operation should succeed");
     }
 
@@ -2274,6 +2837,7 @@ mod filesystem_operation_tests {
         let result = execute_filesystem_operations(
             root.to_string_lossy().into_owned(),
             actions,
+            None,
         )
         .expect("the large reviewed plan should succeed");
 
@@ -2391,6 +2955,7 @@ mod filesystem_operation_tests {
                 OrganizationGrouping::Alphabet,
             ],
             scope: OrganizationScope::AllFiles,
+            subfolder_path: None,
             remove_empty_folders: false,
         };
 
@@ -2456,6 +3021,7 @@ mod filesystem_operation_tests {
                 OrganizationGrouping::Alphabet,
             ],
             scope: OrganizationScope::AllFiles,
+            subfolder_path: None,
             remove_empty_folders: false,
         };
 
@@ -2496,6 +3062,7 @@ mod filesystem_operation_tests {
         let plan = OrganizationPlan {
             group_by: vec![OrganizationGrouping::Root],
             scope: OrganizationScope::AllFiles,
+            subfolder_path: None,
             remove_empty_folders: true,
         };
 
@@ -2530,12 +3097,14 @@ mod filesystem_operation_tests {
             vec![FilesystemAction::Delete {
                 path: "../outside.txt".to_string(),
             }],
+            None,
         );
         let root_delete = execute_filesystem_operations(
             base.clone(),
             vec![FilesystemAction::Delete {
                 path: ".".to_string(),
             }],
+            None,
         );
         let overwrite = execute_filesystem_operations(
             base,
@@ -2543,6 +3112,7 @@ mod filesystem_operation_tests {
                 from: "first.txt".to_string(),
                 to: "second.txt".to_string(),
             }],
+            None,
         );
 
         assert!(escape.is_err());
@@ -2591,6 +3161,404 @@ mod filesystem_operation_tests {
         assert!(read_project_files(base, vec!["../outside.txt".to_string()]).is_err());
 
         fs::remove_dir_all(root).expect("test folder should be removed");
+    }
+
+    // ─── New feature tests ────────────────────────────────────────────────────
+
+    /// Simulate a realistic "Downloads/Projects" folder with 60+ mixed files,
+    /// then verify organize, delete, write, content-search, undo, and
+    /// reference-aware rename all work correctly.
+    fn create_large_test_folder() -> PathBuf {
+        let root = create_test_folder();
+
+        // Source code
+        fs::create_dir_all(root.join("src/components")).unwrap();
+        fs::create_dir_all(root.join("src/services")).unwrap();
+        fs::create_dir_all(root.join("src/utils")).unwrap();
+        fs::write(root.join("src/main.ts"), "import { App } from './components/App';\nApp.run();").unwrap();
+        fs::write(root.join("src/components/App.tsx"), "export function App() { return <div>Hello</div>; }").unwrap();
+        fs::write(root.join("src/components/Button.tsx"), "export function Button({ label }: { label: string }) { return <button>{label}</button>; }").unwrap();
+        fs::write(root.join("src/components/Modal.tsx"), "import { Button } from './Button';\nexport function Modal() { return <div><Button label='Close' /></div>; }").unwrap();
+        fs::write(root.join("src/services/api.ts"), "export async function fetchData(url: string) { return fetch(url); }").unwrap();
+        fs::write(root.join("src/services/auth.ts"), "export function getToken() { return localStorage.getItem('token'); }").unwrap();
+        fs::write(root.join("src/utils/format.ts"), "export function formatDate(d: Date) { return d.toISOString(); }").unwrap();
+        fs::write(root.join("src/utils/helpers.ts"), "export function clamp(n: number, min: number, max: number) { return Math.min(Math.max(n, min), max); }").unwrap();
+
+        // Documents
+        fs::create_dir_all(root.join("docs")).unwrap();
+        fs::write(root.join("docs/README.md"), "# Project\nThis is the project readme.").unwrap();
+        fs::write(root.join("docs/CHANGELOG.md"), "## v1.0\n- Initial release").unwrap();
+        fs::write(root.join("docs/API.md"), "## API Reference\n### fetchData\nFetches remote data.").unwrap();
+        fs::write(root.join("docs/design.md"), "## Design decisions\nUse TypeScript for type safety.").unwrap();
+
+        // Config
+        fs::write(root.join("package.json"), r#"{"name":"test","version":"1.0.0"}"#).unwrap();
+        fs::write(root.join("tsconfig.json"), r#"{"compilerOptions":{"strict":true}}"#).unwrap();
+        fs::write(root.join(".env.example"), "API_URL=https://example.com\nTOKEN=your-token").unwrap();
+        fs::write(root.join("vite.config.ts"), "import { defineConfig } from 'vite';\nexport default defineConfig({});").unwrap();
+
+        // Media files
+        fs::create_dir_all(root.join("assets/images")).unwrap();
+        fs::create_dir_all(root.join("assets/audio")).unwrap();
+        for i in 1..=12 {
+            fs::write(root.join(format!("assets/audio/track{i:02}.mp3")), [0_u8; 8]).unwrap();
+        }
+        for i in 1..=8 {
+            fs::write(root.join(format!("assets/images/photo{i:02}.jpg")), [0_u8; 8]).unwrap();
+        }
+        fs::write(root.join("assets/images/logo.svg"), "<svg></svg>").unwrap();
+
+        // Data files
+        fs::create_dir_all(root.join("data")).unwrap();
+        fs::write(root.join("data/users.csv"), "id,name,email\n1,Alice,alice@example.com\n2,Bob,bob@example.com").unwrap();
+        fs::write(root.join("data/config.yaml"), "server:\n  host: localhost\n  port: 8080").unwrap();
+        fs::write(root.join("data/schema.sql"), "CREATE TABLE users (id INT PRIMARY KEY, name TEXT);").unwrap();
+
+        // Loose files at root
+        for i in 1..=5 {
+            fs::write(root.join(format!("note{i}.txt")), format!("Note number {i}. Contains searchable content.")).unwrap();
+        }
+        fs::write(root.join("build.sh"), "#!/bin/bash\nnpm run build").unwrap();
+        fs::write(root.join("deploy.ps1"), "Write-Host 'Deploying...'\nnpm run deploy").unwrap();
+
+        root
+    }
+
+    #[test]
+    fn write_file_creates_new_and_updates_existing() {
+        let root = create_test_folder();
+        let base = root.to_string_lossy().into_owned();
+
+        // Create a new file
+        let result = write_project_file(
+            base.clone(),
+            "src/new-module.ts".to_string(),
+            "export const answer = 42;".to_string(),
+        ).expect("write should succeed");
+        assert!(result.success);
+        assert!(result.message.contains("Created"));
+        assert_eq!(
+            fs::read_to_string(root.join("src/new-module.ts")).unwrap(),
+            "export const answer = 42;"
+        );
+
+        // Update an existing file
+        let result2 = write_project_file(
+            base.clone(),
+            "src/new-module.ts".to_string(),
+            "export const answer = 100;".to_string(),
+        ).expect("update should succeed");
+        assert!(result2.success);
+        assert!(result2.message.contains("Updated"));
+        assert_eq!(
+            fs::read_to_string(root.join("src/new-module.ts")).unwrap(),
+            "export const answer = 100;"
+        );
+
+        // Reject path traversal attempts
+        assert!(write_project_file(base.clone(), "../escape.txt".to_string(), "bad".to_string()).is_err());
+        assert!(write_project_file(base.clone(), ".env".to_string(), "bad".to_string()).is_err());
+
+        // Reject oversized content
+        let big = "x".repeat(MAX_WRITE_FILE_SIZE + 1);
+        assert!(write_project_file(base, "big.txt".to_string(), big).is_err());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn content_search_finds_terms_across_files() {
+        let root = create_large_test_folder();
+        let base = root.to_string_lossy().into_owned();
+
+        // Search for a unique term
+        let results = search_project_file_contents(
+            base.clone(),
+            "fetchData".to_string(),
+            None,
+            None,
+            None,
+        ).expect("content search should succeed");
+        assert!(results.total_files_searched >= 2, "fetchData appears in api.ts and API.md");
+        assert!(results.results.iter().any(|r| r.path.contains("api.ts")));
+        assert!(results.results.iter().any(|r| r.path.contains("API.md")));
+
+        // Case-insensitive by default
+        let results2 = search_project_file_contents(
+            base.clone(),
+            "fetchdata".to_string(),
+            Some(false),
+            None,
+            None,
+        ).expect("case-insensitive search should succeed");
+        assert!(results2.total_files_searched >= 2);
+
+        // Case-sensitive miss
+        let results3 = search_project_file_contents(
+            base.clone(),
+            "fetchdata".to_string(),
+            Some(true),
+            None,
+            None,
+        ).expect("case-sensitive search should succeed");
+        assert_eq!(results3.total_files_searched, 0, "lowercase version should not match with case-sensitive search");
+
+        // Search for content in notes
+        let results4 = search_project_file_contents(
+            base.clone(),
+            "searchable content".to_string(),
+            None,
+            None,
+            None,
+        ).expect("multi-word search should succeed");
+        assert_eq!(results4.total_files_searched, 5, "all 5 notes contain 'searchable content'");
+
+        // Empty query should fail
+        assert!(search_project_file_contents(base, "".to_string(), None, None, None).is_err());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn undo_restores_deleted_files() {
+        let root = create_test_folder();
+        fs::write(root.join("important.txt"), "do not lose this").unwrap();
+        fs::write(root.join("also-important.md"), "# Keep me").unwrap();
+        fs::write(root.join("disposable.log"), "temp").unwrap();
+        let base = root.to_string_lossy().into_owned();
+
+        // Delete with backup
+        let result = execute_filesystem_operations(
+            base.clone(),
+            vec![
+                FilesystemAction::Delete { path: "important.txt".to_string() },
+                FilesystemAction::Delete { path: "also-important.md".to_string() },
+            ],
+            Some(true),
+        ).expect("delete with backup should succeed");
+        assert!(result.success);
+        let backup = result.backup_path.expect("backup path should be returned");
+        assert!(!root.join("important.txt").exists());
+        assert!(!root.join("also-important.md").exists());
+
+        // Undo restores the files
+        let undo_result = undo_filesystem_operation(base.clone(), backup)
+            .expect("undo should succeed");
+        assert!(undo_result.success);
+        assert!(undo_result.message.contains("2"), "should report 2 restored files");
+        assert_eq!(
+            fs::read_to_string(root.join("important.txt")).unwrap(),
+            "do not lose this"
+        );
+        assert_eq!(
+            fs::read_to_string(root.join("also-important.md")).unwrap(),
+            "# Keep me"
+        );
+
+        // Delete without backup returns no backup path
+        let no_backup = execute_filesystem_operations(
+            base,
+            vec![FilesystemAction::Delete { path: "disposable.log".to_string() }],
+            Some(false),
+        ).expect("delete without backup should succeed");
+        assert!(no_backup.backup_path.is_none());
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn rename_with_references_updates_imports() {
+        let root = create_test_folder();
+        fs::create_dir(root.join("src")).unwrap();
+
+        // Original file
+        fs::write(root.join("src/Button.tsx"), "export function Button() {}").unwrap();
+
+        // Files that reference it
+        fs::write(
+            root.join("src/App.tsx"),
+            "import { Button } from './Button';\nimport { Modal } from './Modal';\nexport function App() { return <Button />; }",
+        ).unwrap();
+        fs::write(
+            root.join("src/index.ts"),
+            "import { Button } from './Button';\nexport { Button };",
+        ).unwrap();
+        // File that should NOT be changed (different name)
+        fs::write(
+            root.join("src/other.ts"),
+            "import { Badge } from './Badge';\nexport default Badge;",
+        ).unwrap();
+
+        let base = root.to_string_lossy().into_owned();
+        let result = rename_with_references(
+            base,
+            "src/Button.tsx".to_string(),
+            "PrimaryButton.tsx".to_string(),
+        ).expect("rename with references should succeed");
+
+        assert!(result.success);
+        assert!(root.join("src/PrimaryButton.tsx").exists());
+        assert!(!root.join("src/Button.tsx").exists());
+
+        // References should be updated
+        let app_content = fs::read_to_string(root.join("src/App.tsx")).unwrap();
+        assert!(app_content.contains("PrimaryButton"), "App.tsx should reference PrimaryButton");
+        assert!(!app_content.contains("'./Button'"), "App.tsx should no longer reference './Button'");
+
+        let index_content = fs::read_to_string(root.join("src/index.ts")).unwrap();
+        assert!(index_content.contains("PrimaryButton"));
+
+        // Unrelated file must not change
+        let other_content = fs::read_to_string(root.join("src/other.ts")).unwrap();
+        assert_eq!(other_content, "import { Badge } from './Badge';\nexport default Badge;");
+
+        // Message should report updates
+        assert!(result.message.contains("renamed") || result.message.contains("Renamed"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn subfolder_organization_scopes_to_subdirectory() {
+        let root = create_test_folder();
+        // Files in a subfolder
+        fs::create_dir_all(root.join("downloads/mixed")).unwrap();
+        fs::write(root.join("downloads/Alpha.mp3"), [0_u8; 8]).unwrap();
+        fs::write(root.join("downloads/Beta.flac"), [0_u8; 8]).unwrap();
+        fs::write(root.join("downloads/Gamma.pdf"), [0_u8; 8]).unwrap();
+        fs::write(root.join("downloads/mixed/Delta.mp3"), [0_u8; 8]).unwrap();
+        // Files at root that should NOT be moved
+        fs::write(root.join("root-level.txt"), "stay here").unwrap();
+
+        let base = root.to_string_lossy().into_owned();
+        let plan = OrganizationPlan {
+            group_by: vec![OrganizationGrouping::FileType],
+            scope: OrganizationScope::Subfolder,
+            subfolder_path: Some("downloads".to_string()),
+            remove_empty_folders: false,
+        };
+
+        let preview = preview_organization_plan(base.clone(), plan.clone())
+            .expect("subfolder preview should succeed");
+        // Should only touch the 4 files inside downloads/
+        assert_eq!(preview.total_files, 4, "only files inside downloads/ should be counted");
+        // Alpha, Beta, Delta -> Audio; Gamma -> Documents
+        assert!(preview.sample_actions.iter().any(|a| matches!(
+            a,
+            FilesystemAction::Move { from, to }
+                if from.starts_with("downloads/") && to.starts_with("downloads/Audio/")
+        )));
+        assert!(preview.sample_actions.iter().any(|a| matches!(
+            a,
+            FilesystemAction::Move { from, to }
+                if from.starts_with("downloads/") && to.starts_with("downloads/Documents/")
+        )));
+
+        execute_organization_plan(base, plan, preview.fingerprint)
+            .expect("subfolder organization should succeed");
+
+        // Files should be in downloads/ subfolders
+        assert!(root.join("downloads/Audio/Alpha.mp3").is_file());
+        assert!(root.join("downloads/Audio/Beta.flac").is_file());
+        assert!(root.join("downloads/Audio/Delta.mp3").is_file());
+        assert!(root.join("downloads/Documents/Gamma.pdf").is_file());
+
+        // Root-level file must be untouched
+        assert_eq!(
+            fs::read_to_string(root.join("root-level.txt")).unwrap(),
+            "stay here"
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn large_folder_organize_delete_and_verify() {
+        let root = create_large_test_folder();
+        let base = root.to_string_lossy().into_owned();
+
+        // ── Step 1: organize assets/audio by file type ───────────────────────
+        let plan = OrganizationPlan {
+            group_by: vec![OrganizationGrouping::FileType],
+            scope: OrganizationScope::Subfolder,
+            subfolder_path: Some("assets/audio".to_string()),
+            remove_empty_folders: false,
+        };
+        let preview = preview_organization_plan(base.clone(), plan.clone())
+            .expect("audio subfolder preview should succeed");
+        assert_eq!(preview.total_files, 12);
+        // All 12 mp3 files should be planned for move into Audio/
+        assert_eq!(preview.planned_moves, 12);
+        execute_organization_plan(base.clone(), plan, preview.fingerprint)
+            .expect("audio organization should succeed");
+        assert!(root.join("assets/audio/Audio/track01.mp3").is_file());
+        assert!(root.join("assets/audio/Audio/track12.mp3").is_file());
+
+        // ── Step 2: delete temp files with backup ────────────────────────────
+        let delete_result = execute_filesystem_operations(
+            base.clone(),
+            vec![
+                FilesystemAction::Delete { path: "note1.txt".to_string() },
+                FilesystemAction::Delete { path: "note2.txt".to_string() },
+                FilesystemAction::Delete { path: "note3.txt".to_string() },
+            ],
+            Some(true),
+        ).expect("delete with backup should succeed");
+        assert!(delete_result.success);
+        let backup_path = delete_result.backup_path.expect("backup path must be present");
+        assert!(!root.join("note1.txt").exists());
+        assert!(!root.join("note2.txt").exists());
+
+        // ── Step 3: undo the deletion ─────────────────────────────────────────
+        let undo = undo_filesystem_operation(base.clone(), backup_path)
+            .expect("undo should succeed");
+        assert!(undo.success);
+        assert!(root.join("note1.txt").exists(), "note1.txt should be restored");
+        assert!(root.join("note2.txt").exists(), "note2.txt should be restored");
+        assert!(root.join("note3.txt").exists(), "note3.txt should be restored");
+
+        // ── Step 4: content search across the large tree ─────────────────────
+        let search = search_project_file_contents(
+            base.clone(),
+            "localhost".to_string(),
+            None,
+            None,
+            None,
+        ).expect("content search should succeed");
+        assert!(search.total_files_searched >= 1, "config.yaml contains 'localhost'");
+        assert!(search.results.iter().any(|r| r.path.contains("config.yaml")));
+
+        // ── Step 5: write a new config file and verify ───────────────────────
+        let write_result = write_project_file(
+            base.clone(),
+            "data/new-config.json".to_string(),
+            r#"{"environment":"test","debug":true}"#.to_string(),
+        ).expect("write should succeed");
+        assert!(write_result.success);
+        assert!(root.join("data/new-config.json").is_file());
+
+        // ── Step 6: rename with references ───────────────────────────────────
+        // api.ts is referenced by its stem, rename it and verify references update
+        let rename_result = rename_with_references(
+            base.clone(),
+            "src/services/api.ts".to_string(),
+            "client.ts".to_string(),
+        ).expect("rename with references should succeed");
+        assert!(rename_result.success);
+        assert!(root.join("src/services/client.ts").is_file());
+        assert!(!root.join("src/services/api.ts").exists());
+
+        // ── Step 7: delete without backup (permanent) ─────────────────────────
+        let perm_delete = execute_filesystem_operations(
+            base.clone(),
+            vec![FilesystemAction::Delete { path: "build.sh".to_string() }],
+            Some(false),
+        ).expect("permanent delete should succeed");
+        assert!(perm_delete.success);
+        assert!(perm_delete.backup_path.is_none());
+        assert!(!root.join("build.sh").exists());
+
+        fs::remove_dir_all(root).unwrap();
     }
 }
 

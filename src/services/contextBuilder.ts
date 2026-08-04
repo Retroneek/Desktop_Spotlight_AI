@@ -1379,7 +1379,9 @@ export function buildCompactFolderContext(folder: ContextAttachment) {
       ? "Access mode: live metadata inventory with selective on-demand reads."
       : "Access mode: read-only snapshot.",
     stats
-      ? `Scan: ${stats.filesFound} found, ${stats.filesIncluded} included, ${stats.filesIgnored} ignored, ${stats.filesSkipped} skipped`
+      ? stats.filesIncluded === 0 && stats.filesSkipped > 0 && isLiveFolder
+        ? `Scan: ${stats.filesFound} files found. All are PDFs, images, or binary documents \u2014 filenames/metadata are available for browsing, searching, and organizing; text content cannot be read.`
+        : `Scan: ${stats.filesFound} found, ${stats.filesIncluded} included, ${stats.filesIgnored} ignored, ${stats.filesSkipped} skipped`
       : `Scan: ${folder.sizeLabel}`,
     "Ignore policy: node_modules, .git, dist, build, target, .cache, .next, .vite, .DS_Store, and .env are not read.",
     tree ? `Tree:\n${tree}` : "",
@@ -1653,12 +1655,18 @@ export function createFolderAttachmentFromScan(
         .slice(0, 400)
         .map(
           (entry) =>
-            `- ${entry.path} · ${formatFileSize(entry.size)} · ${
-              entry.readable ? "readable on demand" : "metadata only"
+            `- ${entry.path} · ${formatFileSize(entry.size)}${
+              entry.readable ? " · readable" : ""
             }`,
         )
         .join("\n")
     : "";
+
+  const allEntriesNonReadable =
+    isLiveFolder &&
+    stats.filesFound > 0 &&
+    stats.filesIncluded === 0 &&
+    stats.filesIgnored === 0;
 
   const preview = [
     `Attached folder: ${scan.rootName}`,
@@ -1670,11 +1678,16 @@ export function createFolderAttachmentFromScan(
       ? `${stats.filesIncluded} files readable on demand`
       : `${stats.filesIncluded} files included`,
     `${stats.filesIgnored} ignored`,
-    `${stats.filesSkipped} too large/unsupported/context-limited`,
+    stats.filesSkipped > 0
+      ? `${stats.filesSkipped} content not text-readable (PDFs, images, Office docs, etc.)`
+      : "",
+    allEntriesNonReadable
+      ? "Note: all files are PDFs, images, or binary documents. Their filenames and metadata are fully available — the AI can browse, search, and organize them by file type or name."
+      : "",
     liveInventory
-      ? `\nLive inventory (metadata only):\n${liveInventory}${
+      ? `\nFiles (${liveEntries?.length ?? 0} entries):\n${liveInventory}${
           liveEntries && liveEntries.length > 400
-            ? `\n- … ${liveEntries.length - 400} more entries available to the local selector`
+            ? `\n- … ${liveEntries.length - 400} more entries available via browse/search`
             : ""
         }`
       : "",
@@ -1692,7 +1705,11 @@ export function createFolderAttachmentFromScan(
     kind: "folder",
     name: scan.rootName,
     typeLabel: isLiveFolder ? "live project folder" : "project folder snapshot",
-    sizeLabel: `${stats.filesFound} files`,
+    sizeLabel: allEntriesNonReadable
+      ? `${stats.filesFound} files (organize-ready)`
+      : stats.filesIncluded > 0
+      ? `${stats.filesFound} files · ${stats.filesIncluded} readable`
+      : `${stats.filesFound} files`,
     preview,
     supported: isLiveFolder ? stats.filesFound > 0 : stats.filesIncluded > 0,
     sourcePath: scan.rootPath?.trim() || undefined,

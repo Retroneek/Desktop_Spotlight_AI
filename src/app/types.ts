@@ -41,7 +41,8 @@ export type FilesystemAction =
   | { type: "rename"; path: string; newName: string }
   | { type: "createFolder"; path: string }
   | { type: "delete"; path: string }
-  | { type: "copy"; from: string; to: string };
+  | { type: "copy"; from: string; to: string }
+  | { type: "write"; path: string; content: string };
 
 export type FilesystemProposal = {
   id: string;
@@ -55,7 +56,8 @@ export type OrganizationGrouping = "fileType" | "alphabet" | "root";
 
 export type OrganizationPlan = {
   groupBy: OrganizationGrouping[];
-  scope: "allFiles";
+  scope: "allFiles" | "subfolder";
+  subfolderPath?: string;
   reasoning: string;
   removeEmptyFolders: boolean;
 };
