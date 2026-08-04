@@ -293,8 +293,56 @@ export function selectLiveFolderPaths(
 }
 
 export function liveFolderQueryNeedsContents(query: string) {
-  return !/\b(?:sort|organize|arrange|group)\b|\b(?:list|show|what(?:'s|s)? in)\s+(?:the\s+)?(?:files|folder|directory)\b|\b(?:folder|repo(?:sitory)?)\s+(?:layout|structure|organized)\b/i.test(
+  const explicitlyRequestsContent =
+    /\b(?:source code|implementation|code logic|app behavior|project purpose|lyrics?)\b/i.test(
+      query,
+    ) ||
+    /\b(?:read|open|inspect|explain|summarize|analy[sz]e|review|debug|diagnose)\b[^.!?]{0,100}\b(?:contents?|text|code|implementation|file)\b/i.test(
+      query,
+    ) ||
+    /\b(?:what(?:'s| is)|show me|tell me)\b[^.!?]{0,80}\b(?:inside|in)\b[^.!?]{0,40}\b(?:file|document|source)\b/i.test(
+      query,
+    );
+
+  if (explicitlyRequestsContent) return true;
+
+  if (
+    /\b(?:sort|organize|arrange|group|move|copy|rename|flatten|delete|remove|cleanup|clean up|create|make|take|put|relocate|transfer)\b/i.test(
+      query,
+    )
+  ) {
+    return false;
+  }
+
+  if (
+    /\b(?:ideas?|suggest(?:ion)?s?|recommend(?:ation)?s?|plan|approach|handle|manage)\b[^.!?]{0,100}\b(?:files?|folders?|director(?:y|ies)|downloads?|workspace|this|it)\b/i.test(
+      query,
+    )
+  ) {
+    return false;
+  }
+
+  return !/\b(?:list|show|what(?:'s|s)? in)\s+(?:the\s+)?(?:files|folder|directory)\b|\b(?:folder|repo(?:sitory)?)\s+(?:layout|structure|organized)\b|\b(?:extension|file type|filename|size|date|artist|album|track|playlist|audio metadata)\b/i.test(
     query,
+  );
+}
+
+export function liveFolderQueryNeedsSummary(query: string) {
+  if (
+    /\b(?:ideas?|suggest(?:ion)?s?|recommend(?:ation)?s?|plan|approach|handle|manage|overview|breakdown)\b/i.test(
+      query,
+    )
+  ) {
+    return true;
+  }
+
+  return (
+    /\b(?:sort|organize|clean up|cleanup)\b[^.!?]{0,100}\b(?:folder|directory|downloads?|workspace|files?)\b/i.test(
+      query,
+    ) &&
+    !/\b(?:by|into)\s+(?:exact\s+)?(?:file\s*type|extension|alphabet|date|year|month|category|size)\b/i.test(
+      query,
+    )
   );
 }
 

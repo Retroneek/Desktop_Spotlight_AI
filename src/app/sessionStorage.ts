@@ -196,6 +196,7 @@ function normalizeStoredAttachment(file: AttachedFile): AttachedFile {
                   : undefined,
               readable: entry.readable,
             }))
+            .slice(0, 2_000)
         : undefined,
     folderStats:
       file.folderStats &&
@@ -210,7 +211,7 @@ function normalizeStoredAttachment(file: AttachedFile): AttachedFile {
             typeof item === "object" &&
             typeof item.path === "string" &&
             typeof item.reason === "string",
-        )
+        ).slice(0, 200)
       : undefined,
   };
 }

@@ -73,7 +73,55 @@ type WorkspaceToolExecutor = (
   argumentsValue: Record<string, unknown>,
 ) => Promise<string>;
 
+function answerUsesWorkspaceSummary(content: string, summaryJson: string) {
+  try {
+    const summary = JSON.parse(summaryJson) as {
+      totalFiles?: unknown;
+      extensionBreakdown?: Array<{ label?: unknown; count?: unknown }>;
+      topLevelBreakdown?: Array<{ label?: unknown; count?: unknown }>;
+    };
+    const normalized = content.toLocaleLowerCase();
+    if (typeof summary.totalFiles === "number") {
+      const exact = String(summary.totalFiles);
+      const formatted = summary.totalFiles.toLocaleString("en-US");
+      if (normalized.includes(exact) || normalized.includes(formatted)) return true;
+    }
+
+    const groundedPairs = [
+      ...(Array.isArray(summary.extensionBreakdown) ? summary.extensionBreakdown : []),
+      ...(Array.isArray(summary.topLevelBreakdown) ? summary.topLevelBreakdown : []),
+    ].filter(
+      (entry): entry is { label: string; count: number } =>
+        typeof entry.label === "string" && typeof entry.count === "number",
+    );
+
+    return groundedPairs.slice(0, 12).some(({ label, count }) => {
+      const labelIndex = normalized.indexOf(label.toLocaleLowerCase());
+      if (labelIndex < 0) return false;
+      const nearby = normalized.slice(Math.max(0, labelIndex - 50), labelIndex + label.length + 50);
+      return nearby.includes(String(count)) || nearby.includes(count.toLocaleString("en-US"));
+    });
+  } catch {
+    return false;
+  }
+}
+
+export type WorkspaceEvidencePolicy = "metadata" | "summary" | "content";
+
 const liveWorkspaceTools = [
+  {
+    type: "function",
+    function: {
+      name: "summarize_workspace",
+      description:
+        "Summarize the complete live workspace locally without returning every filename. Returns total files, folders and bytes; exact extension and top-level distributions; modification-age buckets; largest files; readable-text count; and access limitations. Use this before broad organization advice, cleanup ideas, or planning for a large folder.",
+      parameters: {
+        type: "object",
+        properties: {},
+        additionalProperties: false,
+      },
+    },
+  },
   {
     type: "function",
     function: {
@@ -517,6 +565,8 @@ export function useOllama(baseUrl = DEFAULT_OLLAMA_BASE_URL) {
       onChunk: (chunk: string) => void,
       options?: OllamaChatOptions,
       onToolActivity?: (activity: string) => void,
+      evidencePolicy: WorkspaceEvidencePolicy = "metadata",
+      preloadedWorkspaceSummary = "",
     ) => {
       const selectedModel = model.trim();
       if (!selectedModel) {
@@ -540,11 +590,20 @@ export function useOllama(baseUrl = DEFAULT_OLLAMA_BASE_URL) {
         { role: "system", content: liveWorkspaceToolProtocol },
         ...(lastMessage ? [lastMessage] : []),
       ];
-      let toolCallCount = 0;
-      let successfulToolCallCount = 0;
+      const hasPreloadedSummary = Boolean(preloadedWorkspaceSummary);
+      let toolCallCount = hasPreloadedSummary ? 1 : 0;
+      let successfulToolCallCount = hasPreloadedSummary ? 1 : 0;
+      let discoveryCallCount = hasPreloadedSummary ? 1 : 0;
+      let summaryCallCount = hasPreloadedSummary ? 1 : 0;
+      let latestWorkspaceSummary = preloadedWorkspaceSummary;
+      let contentReadCallCount = 0;
 
       try {
-        for (let round = 0; round < 8; round += 1) {
+        onToolActivity?.("Getting oriented in the folder...");
+        for (let round = 0; round < 10; round += 1) {
+          if (round > 0) {
+            onToolActivity?.("Connecting what I found to your request...");
+          }
           const response = await ollamaFetch(`${normalizedBaseUrl}/api/chat`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -575,16 +634,51 @@ export function useOllama(baseUrl = DEFAULT_OLLAMA_BASE_URL) {
             : [];
 
           if (!toolCalls.length) {
+            const missingEvidence = [
+              discoveryCallCount === 0 ? "browse or search the live folder" : "",
+              evidencePolicy === "summary" && summaryCallCount === 0
+                ? "summarize the complete live folder"
+                : "",
+              evidencePolicy === "content" && contentReadCallCount === 0
+                ? "read at least one relevant text file"
+                : "",
+            ].filter(Boolean);
+            if (missingEvidence.length) {
+              if (round >= 9) {
+                throw new Error(
+                  `The selected model did not gather the required evidence: ${missingEvidence.join(" and ")}.`,
+                );
+              }
+              messages.push({
+                role: "system",
+                content: `Evidence phase incomplete. Do not answer yet. You must ${missingEvidence.join(" and ")} using the available tools, then base the conclusion on those results.`,
+              });
+              onToolActivity?.("I need one more useful piece of evidence...");
+              continue;
+            }
             if (toolCallCount === 0 || successfulToolCallCount === 0) {
-              throw new Error(
-                toolCallCount === 0
-                  ? "The selected model did not use the live workspace tools."
-                  : "The live workspace could not be inspected successfully.",
-              );
+              throw new Error("The live workspace could not be inspected successfully.");
             }
             if (!content) {
               throw new Error("Ollama returned no answer from the live workspace.");
             }
+            if (
+              evidencePolicy === "summary" &&
+              !answerUsesWorkspaceSummary(content, latestWorkspaceSummary)
+            ) {
+              if (round >= 9) {
+                throw new Error("The selected model did not ground its folder advice in the live summary.");
+              }
+              messages.push({ role: "assistant", content });
+              messages.push({
+                role: "system",
+                content:
+                  "That draft was generic and did not use the live folder summary. Revise it using concrete counts and distributions from summarize_workspace. Do not recommend unrelated operating systems, third-party cleanup apps, or scripts when the host can create a reviewed local plan itself.",
+              });
+              onToolActivity?.("Turning the folder summary into specific advice...");
+              continue;
+            }
+            onToolActivity?.("Putting the grounded answer together...");
             onChunk(content);
             return content;
           }
@@ -596,26 +690,55 @@ export function useOllama(baseUrl = DEFAULT_OLLAMA_BASE_URL) {
           });
           for (const toolCall of toolCalls) {
             toolCallCount += 1;
-            if (toolCallCount > 24) {
+            if (toolCallCount > 32) {
               throw new Error("The live workspace inspection requested too many tool calls.");
             }
             const toolName = toolCall.function?.name?.trim() ?? "";
-            onToolActivity?.(
-              {
-                list_workspace_directory: "Browsing the live folder...",
-                search_workspace_paths: "Searching the live folder...",
-                inspect_workspace_entries: "Inspecting current file metadata...",
-                read_workspace_text_files: "Reading current files in a batch...",
-                read_workspace_text_chunk: "Reading the next file section...",
-              }[toolName] ?? "Inspecting the live workspace...",
-            );
             const toolArguments = normalizeToolArguments(
               toolCall.function?.arguments,
+            );
+            const activityPaths = Array.isArray(toolArguments.paths)
+              ? toolArguments.paths.filter((path) => typeof path === "string")
+              : [];
+            const activityPath =
+              typeof toolArguments.path === "string" && toolArguments.path.trim()
+                ? toolArguments.path.trim()
+                : "the top level";
+            const activityQuery =
+              typeof toolArguments.query === "string" && toolArguments.query.trim()
+                ? toolArguments.query.trim()
+                : "relevant names";
+            onToolActivity?.(
+              {
+                list_workspace_directory: `Looking through ${activityPath}...`,
+                summarize_workspace: "Building a complete folder summary...",
+                search_workspace_paths: `Searching for “${activityQuery}”...`,
+                inspect_workspace_entries: `Checking metadata for ${activityPaths.length || "selected"} items...`,
+                read_workspace_text_files: `Reading ${activityPaths.length || "selected"} relevant files...`,
+                read_workspace_text_chunk: `Reading more of ${activityPath}...`,
+              }[toolName] ?? "Checking the live folder...",
             );
             let result: string;
             try {
               result = await executeTool(toolName, toolArguments);
               successfulToolCallCount += 1;
+              if (
+                toolName === "summarize_workspace" ||
+                toolName === "list_workspace_directory" ||
+                toolName === "search_workspace_paths"
+              ) {
+                discoveryCallCount += 1;
+              }
+              if (toolName === "summarize_workspace") {
+                summaryCallCount += 1;
+                latestWorkspaceSummary = result;
+              }
+              if (
+                toolName === "read_workspace_text_files" ||
+                toolName === "read_workspace_text_chunk"
+              ) {
+                contentReadCallCount += 1;
+              }
             } catch (toolError) {
               result = `Tool error: ${getErrorMessage(toolError)}`;
             }

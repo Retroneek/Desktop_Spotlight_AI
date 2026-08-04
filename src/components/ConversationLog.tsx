@@ -9,6 +9,10 @@ import {
 } from "./icons";
 import { MarkdownMessage } from "./MarkdownMessage";
 import { FilesystemProposalParser } from "./FilesystemProposal";
+import {
+  parseOrganizationPlanFromContent,
+  parseProposedActionsFromContent,
+} from "../services/filesystemOps";
 
 type ConversationLogProps = {
   activeModelName: string;
@@ -20,7 +24,7 @@ type ConversationLogProps = {
   streamingTextElementRef: RefObject<HTMLParagraphElement | null>;
   streamingTurnId: string | null;
   folderPath?: string;
-  onFilesystemApplied: () => void;
+  onFilesystemApplied: () => void | Promise<void>;
   onCopyResponse: (content: string) => void;
   onDownloadResponse: (content: string) => void;
   onEditPrompt: (turn: ChatTurn) => void;
@@ -49,9 +53,11 @@ export function ConversationLog({
     <div className="response-panel">
       {isGenerating ? (
         <div className="response-loading-banner">
-          <span className="loading-indicator" aria-live="polite">
-            {generationActivity || "Generating response..."}
-          </span>
+          <span className="response-activity-pulse" aria-hidden="true" />
+          <div className="response-activity-copy" aria-live="polite">
+            <strong>Spotlight is working</strong>
+            <span>{generationActivity || "Thinking through your request..."}</span>
+          </div>
         </div>
       ) : null}
       <div ref={responseLogRef} className="response-log" onScroll={onScroll}>
@@ -70,7 +76,13 @@ export function ConversationLog({
             const canApplyProposal =
               canRegenerateTurn &&
               Boolean(folderPath) &&
-              proposalFolderPath === folderPath;
+              proposalFolderPath?.replace(/\//g, "\\").toLocaleLowerCase() ===
+                folderPath?.replace(/\//g, "\\").toLocaleLowerCase();
+            const hasFilesystemProposal = Boolean(
+              proposalFolderPath &&
+                (parseOrganizationPlanFromContent(turn.content) ||
+                  parseProposedActionsFromContent(turn.content)),
+            );
 
             return (
               <div key={turn.id} className={`turn-row turn-row-${turn.role}`}>
@@ -96,10 +108,13 @@ export function ConversationLog({
                     <p ref={streamingTextElementRef}>{turn.content}</p>
                   ) : (
                     <>
-                      <MarkdownMessage content={turn.content} />
+                      {!hasFilesystemProposal ? (
+                        <MarkdownMessage content={turn.content} />
+                      ) : null}
                       {canApplyProposal && proposalFolderPath ? (
                         <FilesystemProposalParser
                           content={turn.content}
+                          requestContent={session.turns[turnIndex - 1]?.content ?? ""}
                           basePath={proposalFolderPath}
                           onApplied={onFilesystemApplied}
                         />

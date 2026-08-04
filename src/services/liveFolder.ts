@@ -62,6 +62,23 @@ export type WorkspaceFileChunk = {
   content: string;
 };
 
+export type WorkspaceSummary = {
+  totalFiles: number;
+  totalFolders: number;
+  totalBytes: number;
+  readableTextFiles: number;
+  ignoredEntries: number;
+  inaccessibleEntries: number;
+  modifiedLast7Days: number;
+  modifiedLast30Days: number;
+  modifiedLastYear: number;
+  modifiedOverYearAgo: number;
+  unknownModifiedDate: number;
+  extensionBreakdown: Array<{ label: string; count: number }>;
+  topLevelBreakdown: Array<{ label: string; count: number }>;
+  largestFiles: Array<{ path: string; size: number }>;
+};
+
 export function browseLiveFolder(
   basePath: string,
   relativePath = "",
@@ -113,6 +130,12 @@ export function readLiveFolderFileChunk(
 
 export function refreshLiveFolder(basePath: string) {
   return invoke<ProjectFolderScan>("refresh_project_folder", {
+    basePath,
+  });
+}
+
+export function summarizeLiveFolder(basePath: string) {
+  return invoke<WorkspaceSummary>("summarize_project_folder", {
     basePath,
   });
 }

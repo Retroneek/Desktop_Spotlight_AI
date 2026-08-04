@@ -16,6 +16,7 @@ import {
   createFolderAttachmentFromScan,
   hydrateLiveFolderAttachment,
   liveFolderQueryNeedsContents,
+  liveFolderQueryNeedsSummary,
   selectLiveFolderPaths,
   type ProjectFolderScan,
   summarizeBrowserFolder,
@@ -36,6 +37,7 @@ import {
   readLiveFolderFiles,
   refreshLiveFolder,
   searchLiveFolder,
+  summarizeLiveFolder,
 } from "./services/liveFolder";
 import {
   composerLayout,
@@ -118,6 +120,41 @@ function workspaceToolPaths(argumentsValue: Record<string, unknown>, maximum: nu
       ),
     ),
   ].slice(0, maximum);
+}
+
+function normalizeLiveFolderPath(path?: string) {
+  return path?.trim().replace(/\//g, "\\").replace(/\\+$/, "").toLocaleLowerCase();
+}
+
+function isSameLiveFolder(
+  left: AttachedFile | null | undefined,
+  right: AttachedFile | null | undefined,
+) {
+  if (!left || !right || left.kind !== "folder" || right.kind !== "folder") {
+    return false;
+  }
+
+  const leftPath = normalizeLiveFolderPath(left.sourcePath);
+  const rightPath = normalizeLiveFolderPath(right.sourcePath);
+  return Boolean(leftPath && rightPath && leftPath === rightPath) || left.id === right.id;
+}
+
+function contradictsLiveFolderCapability(content: string) {
+  return /\b(?:can't|cannot|can not|unable to|do not have|don't have)\b[^.!?]{0,140}\b(?:access|modify|move|organize|delete|rename|files?|folders?|computer)\b/i.test(
+    content,
+  );
+}
+
+function describesFolderAction(content: string) {
+  return /\b(?:sort|organize|arrange|group|move|copy|rename|flatten|delete|remove|cleanup|clean up|create|relocate|transfer)\b/i.test(
+    content,
+  );
+}
+
+function usesOnDemandToolsInsteadOfFullRefresh(folder: AttachedFile) {
+  return Boolean(
+    folder.sourcePath && (folder.folderStats?.filesFound ?? 0) > 5_000,
+  );
 }
 
 function App() {
@@ -888,12 +925,9 @@ function App() {
     const files = turn.files ?? [];
     const folderReference =
       files.find((file) => file.kind === "folder") ?? null;
-    const isSameFolderStillAttached =
-      folderReference &&
-      projectContext?.name === folderReference.name &&
-      projectContext?.folderStats?.filesIncluded ===
-        folderReference.folderStats?.filesIncluded;
-    const folder = isSameFolderStillAttached ? projectContext : folderReference;
+    const folder = isSameLiveFolder(projectContext, folderReference)
+      ? projectContext
+      : folderReference;
     const draftFiles = files.filter((file) => file.kind !== "folder");
 
     setMessage(turn.content);
@@ -961,9 +995,7 @@ function App() {
         id: folder.id,
         sourcePath: folder.sourcePath,
       };
-      setProjectContext((current) =>
-        current?.id === folder.id ? refreshed : current,
-      );
+      synchronizeLiveFolder(refreshed);
       return refreshed;
     } catch (caughtError) {
       if (required) {
@@ -975,6 +1007,32 @@ function App() {
       }
       return folder;
     }
+  }
+
+  function synchronizeLiveFolder(refreshed: AttachedFile) {
+    setProjectContext((current) =>
+      isSameLiveFolder(current, refreshed) ? refreshed : current,
+    );
+    setSessions((current) =>
+      current.map((session) => {
+        let sessionChanged = false;
+        const turns = session.turns.map((turn) => {
+          if (!turn.files?.some((file) => isSameLiveFolder(file, refreshed))) {
+            return turn;
+          }
+
+          sessionChanged = true;
+          return {
+            ...turn,
+            files: turn.files.map((file) =>
+              isSameLiveFolder(file, refreshed) ? refreshed : file,
+            ),
+          };
+        });
+
+        return sessionChanged ? { ...session, turns } : session;
+      }),
+    );
   }
 
   function clearAttachmentInputs() {
@@ -1030,12 +1088,18 @@ function App() {
       sessionId,
       baseTurns,
       visibleContent,
-      filesForTurn,
+      filesForTurn: requestedFilesForTurn,
       assistantTurnId,
       userTurnId,
       shouldAppendUserTurn,
       shouldClearComposerOnSuccess,
     } = options;
+
+    const filesForTurn = requestedFilesForTurn.map((file) =>
+      projectContext && isSameLiveFolder(file, projectContext)
+        ? projectContext
+        : file,
+    );
 
     const now = Date.now();
 
@@ -1146,8 +1210,11 @@ function App() {
       let retrievalQuery = visibleContent;
       let promptFolderFiles = folderFiles;
       let usedLiveWorkspaceAgent = false;
+      let groundedRequestMessages = chatMessages;
+      let fallbackWorkspaceSummary = "";
 
       try {
+        setWorkspaceActivity("Understanding what you want to do...");
         shouldUseProjectContext = folderFiles.length
           ? await shouldReadProject(
               directPrompt,
@@ -1158,12 +1225,29 @@ function App() {
         let requestMessages = chatMessages;
 
         if (shouldUseProjectContext) {
+          setWorkspaceActivity(
+            folderFiles.length === 1
+              ? usesOnDemandToolsInsteadOfFullRefresh(folderFiles[0])
+                ? `Preparing live tools for ${folderFiles[0].name}...`
+                : `Refreshing ${folderFiles[0].name}...`
+              : `Refreshing ${folderFiles.length} attached folders...`,
+          );
           retrievalQuery = buildProjectRetrievalQuery(
             visibleContent,
             recentContextHistory.slice(-2),
           );
+          const requiresFileContents = liveFolderQueryNeedsContents(retrievalQuery);
+          const evidencePolicy = requiresFileContents
+            ? "content"
+            : liveFolderQueryNeedsSummary(retrievalQuery)
+              ? "summary"
+              : "metadata";
           const refreshedFolderFiles = await Promise.all(
-            folderFiles.map((folder) => rescanLiveFolder(folder, true)),
+            folderFiles.map((folder) =>
+              usesOnDemandToolsInsteadOfFullRefresh(folder)
+                ? folder
+                : rescanLiveFolder(folder, true),
+            ),
           );
           const currentFilesForTurn = filesForTurn.map((file) =>
             file.kind === "folder"
@@ -1184,13 +1268,35 @@ function App() {
               true,
               retrievalQuery,
             );
-            const liveMessages = buildMessages(
+            if (evidencePolicy === "summary") {
+              try {
+                setWorkspaceActivity(`Summarizing all of ${liveToolFolder.name} locally...`);
+                fallbackWorkspaceSummary = JSON.stringify(
+                  await summarizeLiveFolder(liveToolFolder.sourcePath),
+                );
+              } catch {
+                fallbackWorkspaceSummary = "";
+              }
+            }
+            let liveMessages = buildMessages(
               requestSession,
               livePrompt,
               hardwareProfile,
               currentFilesForTurn,
               "",
             );
+            if (fallbackWorkspaceSummary) {
+              const latestRequest = liveMessages[liveMessages.length - 1];
+              liveMessages = [
+                ...liveMessages.slice(0, -1),
+                {
+                  role: "system",
+                  content: `Complete live-folder summary gathered locally:\n${fallbackWorkspaceSummary}\nUse these actual counts and distributions. Do not replace them with generic folder advice, unrelated third-party apps, scripts, or claims that the live folder is inaccessible.`,
+                },
+                ...(latestRequest ? [latestRequest] : []),
+              ];
+            }
+            groundedRequestMessages = liveMessages;
             try {
               returnedText = await runLiveWorkspaceAgent(
                 liveMessages,
@@ -1234,6 +1340,10 @@ function App() {
                       return JSON.stringify(
                         await inspectLiveFolderEntries(basePath, paths),
                       );
+                    }
+                    case "summarize_workspace": {
+                      setWorkspaceActivity(`Building a complete picture of ${liveToolFolder.name}...`);
+                      return JSON.stringify(await summarizeLiveFolder(basePath));
                     }
                     case "read_workspace_text_files": {
                       const paths = workspaceToolPaths(argumentsValue, 8);
@@ -1284,6 +1394,8 @@ function App() {
                 handleToken,
                 buildGenerationOptions(currentFilesForTurn),
                 setWorkspaceActivity,
+                evidencePolicy,
+                fallbackWorkspaceSummary,
               );
               promptFolderFiles = refreshedFolderFiles;
               usedLiveWorkspaceAgent = true;
@@ -1294,10 +1406,21 @@ function App() {
               ) {
                 throw workspaceAgentError;
               }
+              if (evidencePolicy === "summary" && !fallbackWorkspaceSummary) {
+                try {
+                  setWorkspaceActivity(`Summarizing all of ${liveToolFolder.name} locally...`);
+                  fallbackWorkspaceSummary = JSON.stringify(
+                    await summarizeLiveFolder(liveToolFolder.sourcePath),
+                  );
+                } catch {
+                  fallbackWorkspaceSummary = "";
+                }
+              }
             }
           }
 
           if (!usedLiveWorkspaceAgent) {
+            setWorkspaceActivity("Choosing the most useful folder evidence...");
             promptFolderFiles = await Promise.all(
               refreshedFolderFiles.map(async (folder) => {
                 if (!folder.sourcePath || !folder.liveEntries?.length) {
@@ -1311,10 +1434,7 @@ function App() {
                     activeModelName,
                     folder.liveEntries,
                   );
-                  if (
-                    !selectedPaths.length &&
-                    liveFolderQueryNeedsContents(retrievalQuery)
-                  ) {
+                  if (!selectedPaths.length && requiresFileContents) {
                     selectedPaths = selectLiveFolderPaths(
                       folder,
                       retrievalQuery,
@@ -1330,7 +1450,9 @@ function App() {
                   selectedPaths = selectLiveFolderPaths(folder, retrievalQuery);
                 }
 
-                if (!selectedPaths.length) return folder;
+                if (!selectedPaths.length) {
+                  return folder;
+                }
 
                 try {
                   let liveFiles = await readLiveFolderFiles(
@@ -1383,10 +1505,23 @@ function App() {
               currentFilesForTurn,
               "",
             );
+            if (fallbackWorkspaceSummary) {
+              const latestRequest = requestMessages[requestMessages.length - 1];
+              requestMessages = [
+                ...requestMessages.slice(0, -1),
+                {
+                  role: "system",
+                  content: `Complete live-folder summary gathered locally:\n${fallbackWorkspaceSummary}\nUse these actual counts and distributions. Do not replace them with generic folder advice, unrelated third-party apps, or claims that the live folder is inaccessible.`,
+                },
+                ...(latestRequest ? [latestRequest] : []),
+              ];
+            }
+            groundedRequestMessages = requestMessages;
           }
         }
 
         if (!usedLiveWorkspaceAgent) {
+          setWorkspaceActivity("Putting the response together...");
           returnedText = await streamChat(
             requestMessages,
             activeModelName,
@@ -1394,6 +1529,35 @@ function App() {
             buildGenerationOptions(
               shouldUseProjectContext ? filesForTurn : directFiles,
             ),
+          );
+        }
+
+        const draftText =
+          (typeof returnedText === "string" ? returnedText.trim() : "") ||
+          streamedTextRef.current.trim();
+        if (
+          folderFiles.some((folder) => Boolean(folder.sourcePath)) &&
+          describesFolderAction(retrievalQuery) &&
+          contradictsLiveFolderCapability(draftText)
+        ) {
+          streamedTextRef.current = "";
+          queueStreamPaint();
+          setWorkspaceActivity("Correcting a capability mismatch...");
+          const lastMessage = groundedRequestMessages[groundedRequestMessages.length - 1];
+          const correctedMessages: OllamaMessage[] = [
+            ...groundedRequestMessages.slice(0, -1),
+            {
+              role: "system",
+              content:
+                "The prior draft incorrectly denied filesystem capability. A live folder is attached and the host can apply reviewed file proposals. Answer the user's actual request using the gathered evidence. If one action is unambiguous, return its reviewed Spotlight proposal; if 'that' refers to multiple materially different options, ask one concise clarification. Do not claim the folder is inaccessible.",
+            },
+            ...(lastMessage ? [lastMessage] : []),
+          ];
+          returnedText = await streamChat(
+            correctedMessages,
+            activeModelName,
+            handleToken,
+            buildGenerationOptions(filesForTurn),
           );
         }
       } catch (primaryError) {
@@ -1544,8 +1708,7 @@ function App() {
       baseTurns: regenerateTarget.historyBeforeUserTurn,
       visibleContent: regenerateTarget.userTurn.content,
       filesForTurn: (regenerateTarget.userTurn.files ?? []).map((file) =>
-        file.kind === "folder" &&
-        projectContext?.name === file.name
+        projectContext && isSameLiveFolder(file, projectContext)
           ? projectContext
           : file,
       ),
@@ -1856,9 +2019,9 @@ function App() {
             streamingTextElementRef={streamingTextElementRef}
             streamingTurnId={streamingTurnId}
             folderPath={projectContext?.sourcePath}
-            onFilesystemApplied={() => {
+            onFilesystemApplied={async () => {
               if (projectContext) {
-                void rescanLiveFolder(projectContext);
+                await rescanLiveFolder(projectContext, true);
               }
             }}
             onCopyResponse={(content) => {

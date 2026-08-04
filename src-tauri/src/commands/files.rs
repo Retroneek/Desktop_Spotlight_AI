@@ -10,7 +10,7 @@ use std::{
     io::{Read, Seek, SeekFrom},
     path::{Component, Path, PathBuf},
 };
-use tauri::AppHandle;
+use tauri::{AppHandle, Emitter};
 use tauri_plugin_dialog::DialogExt;
 
 const MAX_FILE_SIZE: u64 = 200 * 1024;
@@ -18,6 +18,7 @@ const MAX_FILE_CONTEXT_CHARACTERS: usize = 200_000;
 const MAX_SELECTIVE_READ_FILES: usize = 8;
 const MAX_SELECTIVE_READ_CHARACTERS: usize = 60_000;
 const MAX_LIVE_FOLDER_ENTRIES: usize = 2_000;
+const MAX_SKIPPED_FILE_DETAILS: usize = 200;
 const MAX_TREE_ENTRIES: usize = 400;
 // Keep large folder reviews practical while still placing a firm ceiling on a
 // single approval. A typical music library can easily contain more than 50
@@ -53,6 +54,7 @@ pub struct OrganizationPlan {
 #[serde(rename_all = "camelCase")]
 enum OrganizationGrouping {
     FileType,
+    Category,
     Alphabet,
     Root,
 }
@@ -71,6 +73,7 @@ pub struct OrganizationPreview {
     planned_moves: usize,
     unchanged_files: usize,
     conflicts: usize,
+    collision_renames: usize,
     batch_count: usize,
     planned_folder_removals: usize,
     type_breakdown: BTreeMap<String, usize>,
@@ -81,6 +84,17 @@ pub struct OrganizationPreview {
 pub struct OperationResult {
     success: bool,
     message: String,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OrganizationProgress {
+    base_path: String,
+    phase: &'static str,
+    processed: usize,
+    total: usize,
+    moved: usize,
+    failed: usize,
 }
 
 #[derive(Serialize)]
@@ -134,6 +148,57 @@ pub struct WorkspaceEntryPage {
     entries: Vec<WorkspaceEntry>,
     next_cursor: Option<usize>,
     total_matches: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSummaryCount {
+    label: String,
+    count: usize,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSummaryFile {
+    path: String,
+    size: u64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceSummary {
+    total_files: usize,
+    total_folders: usize,
+    total_bytes: u64,
+    readable_text_files: usize,
+    ignored_entries: usize,
+    inaccessible_entries: usize,
+    modified_last_7_days: usize,
+    modified_last_30_days: usize,
+    modified_last_year: usize,
+    modified_over_year_ago: usize,
+    unknown_modified_date: usize,
+    extension_breakdown: Vec<WorkspaceSummaryCount>,
+    top_level_breakdown: Vec<WorkspaceSummaryCount>,
+    largest_files: Vec<WorkspaceSummaryFile>,
+}
+
+#[derive(Default)]
+struct WorkspaceSummaryAccumulator {
+    total_files: usize,
+    total_folders: usize,
+    total_bytes: u64,
+    readable_text_files: usize,
+    ignored_entries: usize,
+    inaccessible_entries: usize,
+    modified_last_7_days: usize,
+    modified_last_30_days: usize,
+    modified_last_year: usize,
+    modified_over_year_ago: usize,
+    unknown_modified_date: usize,
+    extensions: HashMap<String, usize>,
+    top_level: HashMap<String, usize>,
+    largest_files: Vec<WorkspaceSummaryFile>,
 }
 
 #[derive(Serialize)]
@@ -219,6 +284,149 @@ pub fn refresh_project_folder(base_path: String) -> Result<ProjectFolderScan, St
     }
 
     scan_project_folder(root_path)
+}
+
+#[tauri::command]
+pub fn summarize_project_folder(base_path: String) -> Result<WorkspaceSummary, String> {
+    let base = fs::canonicalize(&base_path)
+        .map_err(|error| format!("Could not open the selected folder: {error}"))?;
+    if !base.is_dir() {
+        return Err("The selected project path is not a folder".to_string());
+    }
+
+    let mut summary = WorkspaceSummaryAccumulator::default();
+    collect_workspace_summary(&base, &base, &mut summary)?;
+
+    fn ranked_counts(values: HashMap<String, usize>, maximum: usize) -> Vec<WorkspaceSummaryCount> {
+        let mut values = values.into_iter().collect::<Vec<_>>();
+        values.sort_by(|left, right| right.1.cmp(&left.1).then_with(|| left.0.cmp(&right.0)));
+        values
+            .into_iter()
+            .take(maximum)
+            .map(|(label, count)| WorkspaceSummaryCount { label, count })
+            .collect()
+    }
+
+    summary
+        .largest_files
+        .sort_by(|left, right| right.size.cmp(&left.size).then_with(|| left.path.cmp(&right.path)));
+    summary.largest_files.truncate(12);
+
+    Ok(WorkspaceSummary {
+        total_files: summary.total_files,
+        total_folders: summary.total_folders,
+        total_bytes: summary.total_bytes,
+        readable_text_files: summary.readable_text_files,
+        ignored_entries: summary.ignored_entries,
+        inaccessible_entries: summary.inaccessible_entries,
+        modified_last_7_days: summary.modified_last_7_days,
+        modified_last_30_days: summary.modified_last_30_days,
+        modified_last_year: summary.modified_last_year,
+        modified_over_year_ago: summary.modified_over_year_ago,
+        unknown_modified_date: summary.unknown_modified_date,
+        extension_breakdown: ranked_counts(summary.extensions, 40),
+        top_level_breakdown: ranked_counts(summary.top_level, 30),
+        largest_files: summary.largest_files,
+    })
+}
+
+fn collect_workspace_summary(
+    base: &Path,
+    directory: &Path,
+    summary: &mut WorkspaceSummaryAccumulator,
+) -> Result<(), String> {
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if directory == base => {
+            return Err(format!("Could not scan {}: {error}", directory.display()));
+        }
+        Err(_) => {
+            summary.inaccessible_entries += 1;
+            return Ok(());
+        }
+    };
+
+    for entry in entries {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => {
+                summary.inaccessible_entries += 1;
+                continue;
+            }
+        };
+        let path = entry.path();
+        let relative = path.strip_prefix(base).unwrap_or(&path);
+        let metadata = match fs::symlink_metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                summary.inaccessible_entries += 1;
+                continue;
+            }
+        };
+        if metadata.file_type().is_symlink() {
+            summary.ignored_entries += 1;
+            continue;
+        }
+        if metadata.is_dir() {
+            if is_ignored_directory(&path) {
+                summary.ignored_entries += 1;
+                continue;
+            }
+            summary.total_folders += 1;
+            collect_workspace_summary(base, &path, summary)?;
+            continue;
+        }
+        if !metadata.is_file() {
+            summary.ignored_entries += 1;
+            continue;
+        }
+        if is_ignored_workspace_path(relative) {
+            summary.ignored_entries += 1;
+            continue;
+        }
+
+        let normalized = relative.to_string_lossy().replace('\\', "/");
+        let top_level = normalized
+            .split('/')
+            .next()
+            .filter(|value| normalized.contains('/') && !value.is_empty())
+            .unwrap_or("(root)")
+            .to_string();
+        *summary.top_level.entry(top_level).or_insert(0) += 1;
+        *summary
+            .extensions
+            .entry(organization_file_type(&path))
+            .or_insert(0) += 1;
+        summary.total_files += 1;
+        summary.total_bytes = summary.total_bytes.saturating_add(metadata.len());
+        if is_supported_project_file(&path) && metadata.len() <= MAX_FILE_SIZE {
+            summary.readable_text_files += 1;
+        }
+
+        match metadata
+            .modified()
+            .ok()
+            .and_then(|value| std::time::SystemTime::now().duration_since(value).ok())
+            .map(|duration| duration.as_secs())
+        {
+            Some(age) if age <= 7 * 24 * 60 * 60 => summary.modified_last_7_days += 1,
+            Some(age) if age <= 30 * 24 * 60 * 60 => summary.modified_last_30_days += 1,
+            Some(age) if age <= 365 * 24 * 60 * 60 => summary.modified_last_year += 1,
+            Some(_) => summary.modified_over_year_ago += 1,
+            None => summary.unknown_modified_date += 1,
+        }
+
+        summary.largest_files.push(WorkspaceSummaryFile {
+            path: normalized,
+            size: metadata.len(),
+        });
+        if summary.largest_files.len() > 24 {
+            summary.largest_files.sort_by(|left, right| right.size.cmp(&left.size));
+            summary.largest_files.truncate(12);
+        }
+    }
+
+    Ok(())
 }
 
 #[tauri::command]
@@ -983,9 +1191,52 @@ struct OrganizationState {
     total_files: usize,
     unchanged_files: usize,
     conflicts: usize,
+    collision_renames: usize,
     planned_folder_removals: usize,
     type_breakdown: BTreeMap<String, usize>,
     moves: Vec<(String, String)>,
+}
+
+fn reserve_organization_destination(
+    base: &Path,
+    desired: &str,
+    destinations: &mut HashSet<String>,
+    collision_counters: &mut HashMap<String, usize>,
+) -> Option<(String, bool)> {
+    let is_available = |candidate: &str, reserved: &HashSet<String>| {
+        !reserved.contains(&candidate.to_ascii_lowercase()) && !path_exists(&base.join(candidate))
+    };
+
+    if is_available(desired, destinations) {
+        destinations.insert(desired.to_ascii_lowercase());
+        return Some((desired.to_string(), false));
+    }
+
+    let desired_path = Path::new(desired);
+    let parent = desired_path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = desired_path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .unwrap_or("file");
+    let extension = desired_path.extension().and_then(|value| value.to_str());
+
+    let desired_key = desired.to_ascii_lowercase();
+    let first_number = collision_counters.get(&desired_key).copied().unwrap_or(2);
+    for number in first_number..=100_000usize {
+        let file_name = match extension {
+            Some(value) if !value.is_empty() => format!("{stem} ({number}).{value}"),
+            _ => format!("{stem} ({number})"),
+        };
+        let candidate = parent.join(file_name).to_string_lossy().replace('\\', "/");
+        if is_available(&candidate, destinations) {
+            destinations.insert(candidate.to_ascii_lowercase());
+            collision_counters.insert(desired_key, number + 1);
+            return Some((candidate, true));
+        }
+    }
+
+    None
 }
 
 fn collect_organization_files(
@@ -1042,6 +1293,14 @@ fn collect_organization_files(
 }
 
 fn organization_file_type(path: &Path) -> String {
+    path.extension()
+        .and_then(|value| value.to_str())
+        .filter(|value| !value.is_empty())
+        .map(|value| value.to_ascii_uppercase())
+        .unwrap_or_else(|| "No Extension".to_string())
+}
+
+fn organization_category(path: &Path) -> String {
     let extension = path
         .extension()
         .and_then(|value| value.to_str())
@@ -1096,6 +1355,7 @@ fn organization_destination(file: &OrganizationFile, plan: &OrganizationPlan) ->
     for grouping in &plan.group_by {
         match grouping {
             OrganizationGrouping::FileType => destination.push(organization_file_type(source)),
+            OrganizationGrouping::Category => destination.push(organization_category(source)),
             OrganizationGrouping::Alphabet => {
                 destination.push(organization_alphabet_bucket(source))
             }
@@ -1151,14 +1411,22 @@ fn build_organization_state(base: &Path, plan: &OrganizationPlan) -> Result<Orga
     }
     let fingerprint = format!("{:016x}", hasher.finish());
     let mut destinations = HashSet::new();
+    let mut collision_counters = HashMap::new();
     let mut moves = Vec::new();
     let mut unchanged_files = 0usize;
     let mut conflicts = 0usize;
+    let mut collision_renames = 0usize;
     let mut type_breakdown = BTreeMap::new();
 
     for file in &files {
+        let source_path = Path::new(&file.relative_path);
+        let breakdown_label = if plan.group_by.contains(&OrganizationGrouping::FileType) {
+            organization_file_type(source_path)
+        } else {
+            organization_category(source_path)
+        };
         *type_breakdown
-            .entry(organization_file_type(Path::new(&file.relative_path)))
+            .entry(breakdown_label)
             .or_insert(0) += 1;
         let destination = organization_destination(file, plan);
         if destination.eq_ignore_ascii_case(&file.relative_path) {
@@ -1166,12 +1434,18 @@ fn build_organization_state(base: &Path, plan: &OrganizationPlan) -> Result<Orga
             continue;
         }
 
-        let destination_key = destination.to_ascii_lowercase();
-        if !destinations.insert(destination_key) || path_exists(&base.join(&destination)) {
-            conflicts += 1;
-            continue;
+        match reserve_organization_destination(
+            base,
+            &destination,
+            &mut destinations,
+            &mut collision_counters,
+        ) {
+            Some((destination, was_renamed)) => {
+                collision_renames += usize::from(was_renamed);
+                moves.push((file.relative_path.clone(), destination));
+            }
+            None => conflicts += 1,
         }
-        moves.push((file.relative_path.clone(), destination));
     }
 
     let move_destinations = moves
@@ -1209,6 +1483,7 @@ fn build_organization_state(base: &Path, plan: &OrganizationPlan) -> Result<Orga
         total_files: files.len(),
         unchanged_files,
         conflicts,
+        collision_renames,
         planned_folder_removals,
         type_breakdown,
         moves,
@@ -1243,6 +1518,7 @@ pub fn preview_organization_plan(
         planned_moves,
         unchanged_files: state.unchanged_files,
         conflicts: state.conflicts,
+        collision_renames: state.collision_renames,
         batch_count: planned_moves.div_ceil(ORGANIZATION_BATCH_SIZE),
         planned_folder_removals: state.planned_folder_removals,
         type_breakdown: state.type_breakdown,
@@ -1250,8 +1526,32 @@ pub fn preview_organization_plan(
     })
 }
 
-#[tauri::command]
-pub fn execute_organization_plan(
+fn emit_organization_progress(
+    app: Option<&AppHandle>,
+    base_path: &str,
+    phase: &'static str,
+    processed: usize,
+    total: usize,
+    moved: usize,
+    failed: usize,
+) {
+    if let Some(app) = app {
+        let _ = app.emit(
+            "organization-progress",
+            OrganizationProgress {
+                base_path: base_path.to_string(),
+                phase,
+                processed,
+                total,
+                moved,
+                failed,
+            },
+        );
+    }
+}
+
+fn execute_organization_plan_blocking(
+    app: Option<&AppHandle>,
     base_path: String,
     plan: OrganizationPlan,
     expected_fingerprint: String,
@@ -1262,51 +1562,64 @@ pub fn execute_organization_plan(
         return Err("The selected project path is not a folder".to_string());
     }
     let state = build_organization_state(&base, &plan)?;
-    if state.fingerprint != expected_fingerprint {
-        return Err(
-            "The folder changed after the preview. Review a fresh plan before applying it."
-                .to_string(),
-        );
-    }
+    let folder_changed_since_review = state.fingerprint != expected_fingerprint;
     let move_count = state.moves.len();
     let batch_count = move_count.div_ceil(ORGANIZATION_BATCH_SIZE);
-    let mut applied: Vec<(PathBuf, PathBuf)> = Vec::with_capacity(move_count);
+    let mut moved_count = 0usize;
+    let mut failed_count = 0usize;
+    let mut processed_count = 0usize;
+    let mut failure_examples = Vec::new();
+    emit_organization_progress(app, &base_path, "moving", 0, move_count, 0, 0);
 
-    for batch in state.moves.chunks(ORGANIZATION_BATCH_SIZE) {
-        for (from, to) in batch {
-            let source = match resolve_existing_path(&base, from, "Move source") {
-                Ok(path) => path,
-                Err(error) => {
-                    rollback_organization_moves(&applied);
-                    return Err(error);
-                }
-            };
-            let destination = match resolve_destination_path(&base, to, "Move destination") {
-                Ok(path) => path,
-                Err(error) => {
-                    rollback_organization_moves(&applied);
-                    return Err(error);
-                }
-            };
+    for (from, to) in &state.moves {
+        let move_result = (|| -> Result<(), String> {
+            let source = resolve_existing_path(&base, from, "Move source")?;
+            let destination = resolve_destination_path(&base, to, "Move destination")?;
+            if path_exists(&destination) {
+                return Err(format!("The destination appeared while organizing: {to}"));
+            }
             if let Some(parent) = destination.parent() {
-                if let Err(error) = fs::create_dir_all(parent) {
-                    rollback_organization_moves(&applied);
-                    return Err(format!("Could not create {}: {error}", parent.display()));
+                fs::create_dir_all(parent)
+                    .map_err(|error| format!("Could not create {}: {error}", parent.display()))?;
+            }
+            fs::rename(&source, &destination).map_err(|error| {
+                format!("Could not move {} to {}: {error}", source.display(), destination.display())
+            })
+        })();
+
+        processed_count += 1;
+        match move_result {
+            Ok(()) => moved_count += 1,
+            Err(error) => {
+                failed_count += 1;
+                if failure_examples.len() < 3 {
+                    failure_examples.push(error);
                 }
             }
-            if let Err(error) = fs::rename(&source, &destination) {
-                rollback_organization_moves(&applied);
-                return Err(format!(
-                    "Could not move {} to {}: {error}",
-                    source.display(),
-                    destination.display()
-                ));
-            }
-            applied.push((source, destination));
+        }
+        if processed_count % ORGANIZATION_BATCH_SIZE == 0 || processed_count == move_count {
+            emit_organization_progress(
+                app,
+                &base_path,
+                "moving",
+                processed_count,
+                move_count,
+                moved_count,
+                failed_count,
+            );
         }
     }
 
     let removed_folder_count = if plan.remove_empty_folders {
+        emit_organization_progress(
+            app,
+            &base_path,
+            "cleaning",
+            move_count,
+            move_count,
+            moved_count,
+            failed_count,
+        );
         remove_empty_organization_folders(&base)
     } else {
         0
@@ -1329,18 +1642,72 @@ pub fn execute_organization_plan(
     } else {
         String::new()
     };
-    let move_message = if move_count == 0 {
-        "No files needed moving.".to_string()
+    let rename_message = if state.collision_renames == 0 {
+        String::new()
     } else {
         format!(
-            "Organized {move_count} files in {batch_count} {}.",
-            if batch_count == 1 { "batch" } else { "batches" }
+            " Safely numbered {} duplicate {}.",
+            state.collision_renames,
+            if state.collision_renames == 1 { "name" } else { "names" }
         )
     };
+    let move_message = if move_count == 0 {
+        "No files needed moving.".to_string()
+    } else if failed_count == 0 {
+        format!(
+            "Organized {moved_count} files in {batch_count} {}.",
+            if batch_count == 1 { "batch" } else { "batches" }
+        )
+    } else {
+        format!(
+            "Organized {moved_count} of {move_count} files. {failed_count} {} could not be moved and remained in place.",
+            if failed_count == 1 { "file" } else { "files" }
+        )
+    };
+    let changed_message = if folder_changed_since_review {
+        " The folder changed after review, so the approved rule was safely recalculated against its current contents."
+    } else {
+        ""
+    };
+    let failure_message = if failure_examples.is_empty() {
+        String::new()
+    } else {
+        format!(" Examples: {}", failure_examples.join(" | "))
+    };
+    emit_organization_progress(
+        app,
+        &base_path,
+        "complete",
+        move_count,
+        move_count,
+        moved_count,
+        failed_count,
+    );
     Ok(OperationResult {
-        success: true,
-        message: format!("{move_message}{cleanup_message}{skipped_message}"),
+        success: move_count == 0 || moved_count > 0,
+        message: format!(
+            "{move_message}{rename_message}{cleanup_message}{skipped_message}{changed_message}{failure_message}"
+        ),
     })
+}
+
+#[tauri::command]
+pub async fn execute_organization_plan(
+    app: AppHandle,
+    base_path: String,
+    plan: OrganizationPlan,
+    expected_fingerprint: String,
+) -> Result<OperationResult, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        execute_organization_plan_blocking(
+            Some(&app),
+            base_path,
+            plan,
+            expected_fingerprint,
+        )
+    })
+    .await
+    .map_err(|error| format!("The organization worker stopped unexpectedly: {error}"))?
 }
 
 fn collect_organization_cleanup_folders(
@@ -1379,15 +1746,6 @@ fn remove_empty_organization_folders(base: &Path) -> usize {
         // folders can never be removed by this cleanup pass.
         .filter(|folder| fs::remove_dir(folder).is_ok())
         .count()
-}
-
-fn rollback_organization_moves(applied: &[(PathBuf, PathBuf)]) {
-    for (source, destination) in applied.iter().rev() {
-        if let Some(parent) = source.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let _ = fs::rename(destination, source);
-    }
 }
 
 fn scan_project_folder(root_path: PathBuf) -> Result<ProjectFolderScan, String> {
@@ -1497,10 +1855,12 @@ fn scan_directory(
 
         if is_ignored_file(&path) {
             *files_ignored += 1;
-            skipped_files.push(SkippedFolderFile {
-                path: relative_path,
-                reason: SkippedReason::Ignored,
-            });
+            if skipped_files.len() < MAX_SKIPPED_FILE_DETAILS {
+                skipped_files.push(SkippedFolderFile {
+                    path: relative_path,
+                    reason: SkippedReason::Ignored,
+                });
+            }
             continue;
         }
 
@@ -1511,10 +1871,12 @@ fn scan_directory(
         *total_bytes += metadata.len();
         if live_entries.len() >= MAX_LIVE_FOLDER_ENTRIES {
             *files_skipped += 1;
-            skipped_files.push(SkippedFolderFile {
-                path: relative_path.clone(),
-                reason: SkippedReason::ContextLimit,
-            });
+            if skipped_files.len() < MAX_SKIPPED_FILE_DETAILS {
+                skipped_files.push(SkippedFolderFile {
+                    path: relative_path.clone(),
+                    reason: SkippedReason::ContextLimit,
+                });
+            }
             tree_paths.push(relative_path);
             continue;
         }
@@ -1524,14 +1886,16 @@ fn scan_directory(
             *readable_files += 1;
         } else {
             *files_skipped += 1;
-            skipped_files.push(SkippedFolderFile {
-                path: relative_path.clone(),
-                reason: if metadata.len() > MAX_FILE_SIZE {
-                    SkippedReason::TooLarge
-                } else {
-                    SkippedReason::Unsupported
-                },
-            });
+            if skipped_files.len() < MAX_SKIPPED_FILE_DETAILS {
+                skipped_files.push(SkippedFolderFile {
+                    path: relative_path.clone(),
+                    reason: if metadata.len() > MAX_FILE_SIZE {
+                        SkippedReason::TooLarge
+                    } else {
+                        SkippedReason::Unsupported
+                    },
+                });
+            }
         }
 
         tree_paths.push(relative_path.clone());
@@ -2372,7 +2736,7 @@ mod filesystem_operation_tests {
     }
 
     #[test]
-    fn expands_nested_type_then_alphabet_rules_and_rejects_stale_previews() {
+    fn recalculates_an_approved_rule_when_the_folder_changes_after_preview() {
         let root = create_test_folder();
         fs::create_dir_all(root.join("incoming/nested"))
             .expect("nested fixture folder should be created");
@@ -2387,7 +2751,7 @@ mod filesystem_operation_tests {
         let base = root.to_string_lossy().into_owned();
         let plan = OrganizationPlan {
             group_by: vec![
-                OrganizationGrouping::FileType,
+                OrganizationGrouping::Category,
                 OrganizationGrouping::Alphabet,
             ],
             scope: OrganizationScope::AllFiles,
@@ -2414,17 +2778,14 @@ mod filesystem_operation_tests {
 
         fs::write(root.join("new-file.md"), "folder changed")
             .expect("new fixture should be written");
-        assert!(execute_organization_plan(
-            base.clone(),
-            plan.clone(),
+        let result = execute_organization_plan_blocking(
+            None,
+            base,
+            plan,
             preview.fingerprint,
         )
-        .is_err());
-
-        let fresh = preview_organization_plan(base.clone(), plan.clone())
-            .expect("fresh preview should succeed");
-        execute_organization_plan(base, plan, fresh.fingerprint)
-            .expect("fresh organization plan should succeed");
+        .expect("the approved rule should be safely recalculated");
+        assert!(result.message.contains("folder changed after review"));
         assert!(root.join("Audio/A/Amber Song.mp3").is_file());
         assert!(root.join("Audio/A/Acoustic Book.m4b").is_file());
         assert!(root.join("Documents/B/Bravo Notes.txt").is_file());
@@ -2437,7 +2798,7 @@ mod filesystem_operation_tests {
     }
 
     #[test]
-    fn applies_safe_organization_moves_while_leaving_conflicts_unchanged() {
+    fn safely_numbers_duplicate_destinations_instead_of_skipping_files() {
         let root = create_test_folder();
         fs::create_dir_all(root.join("incoming"))
             .expect("incoming fixture folder should be created");
@@ -2452,7 +2813,7 @@ mod filesystem_operation_tests {
         let base = root.to_string_lossy().into_owned();
         let plan = OrganizationPlan {
             group_by: vec![
-                OrganizationGrouping::FileType,
+                OrganizationGrouping::Category,
                 OrganizationGrouping::Alphabet,
             ],
             scope: OrganizationScope::AllFiles,
@@ -2461,16 +2822,21 @@ mod filesystem_operation_tests {
 
         let preview = preview_organization_plan(base.clone(), plan.clone())
             .expect("preview with a conflict should succeed");
-        assert_eq!(preview.conflicts, 1);
-        assert_eq!(preview.planned_moves, 1);
-        let result = execute_organization_plan(base, plan, preview.fingerprint)
-            .expect("safe moves should still be applied");
+        assert_eq!(preview.conflicts, 0);
+        assert_eq!(preview.collision_renames, 1);
+        assert_eq!(preview.planned_moves, 2);
+        let result = execute_organization_plan_blocking(None, base, plan, preview.fingerprint)
+            .expect("all safe moves should be applied");
 
-        assert!(result.message.contains("1 conflicting file was left unchanged"));
-        assert!(root.join("incoming/Alpha.mp3").is_file());
+        assert!(result.message.contains("Safely numbered 1 duplicate name"));
+        assert!(!root.join("incoming/Alpha.mp3").exists());
         assert_eq!(
             fs::read(root.join("Audio/A/Alpha.mp3")).expect("destination should remain"),
             vec![2_u8; 8]
+        );
+        assert_eq!(
+            fs::read(root.join("Audio/A/Alpha (2).mp3")).expect("duplicate should be preserved"),
+            vec![1_u8; 8]
         );
         assert!(root.join("Audio/B/Beta.flac").is_file());
 
@@ -2505,7 +2871,7 @@ mod filesystem_operation_tests {
         assert_eq!(preview.conflicts, 0);
         assert_eq!(preview.planned_folder_removals, 5);
 
-        let result = execute_organization_plan(base, plan, preview.fingerprint)
+        let result = execute_organization_plan_blocking(None, base, plan, preview.fingerprint)
             .expect("flatten plan should succeed");
         assert!(result.message.contains("Removed 5 empty folders"));
         assert!(root.join("Alpha.mp3").is_file());

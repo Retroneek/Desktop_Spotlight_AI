@@ -51,7 +51,7 @@ export type FilesystemProposal = {
   appliedAt?: number;
 };
 
-export type OrganizationGrouping = "fileType" | "alphabet" | "root";
+export type OrganizationGrouping = "fileType" | "category" | "alphabet" | "root";
 
 export type OrganizationPlan = {
   groupBy: OrganizationGrouping[];
@@ -66,6 +66,7 @@ export type OrganizationPreview = {
   plannedMoves: number;
   unchangedFiles: number;
   conflicts: number;
+  collisionRenames: number;
   batchCount: number;
   plannedFolderRemovals: number;
   typeBreakdown: Record<string, number>;

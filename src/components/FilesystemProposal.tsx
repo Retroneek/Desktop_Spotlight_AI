@@ -9,15 +9,17 @@ import {
   containsSpotlightCommandBlock,
   executeOrganizationPlan,
   executeFilesystemOperations,
+  listenForOrganizationProgress,
   parseOrganizationPlanFromContent,
   parseProposedActionsFromContent,
   previewOrganizationPlan,
 } from "../services/filesystemOps";
+import type { OrganizationProgress } from "../services/filesystemOps";
 
 type FilesystemProposalProps = {
   basePath: string;
   proposal: FilesystemProposal;
-  onApproved?: (proposal: FilesystemProposal) => void;
+  onApproved?: (proposal: FilesystemProposal) => void | Promise<void>;
   onRejected?: () => void;
 };
 
@@ -55,24 +57,35 @@ function isContradictoryOrganizationReasoning(
   );
 }
 
-const organizationPresets = [
-  {
-    key: "fileType-alphabet",
-    label: "File type, then alphabet",
-    groupBy: ["fileType", "alphabet"],
-  },
-  {
-    key: "alphabet-fileType",
-    label: "Alphabet, then file type",
-    groupBy: ["alphabet", "fileType"],
-  },
-  { key: "fileType", label: "File type only", groupBy: ["fileType"] },
-  { key: "alphabet", label: "Alphabet only", groupBy: ["alphabet"] },
-  { key: "root", label: "Move files to the main folder", groupBy: ["root"] },
-] as const;
+function organizationLabel(plan: OrganizationPlan) {
+  return plan.groupBy
+    .map((group) => {
+      switch (group) {
+        case "fileType":
+          return "exact file type";
+        case "category":
+          return "broad category";
+        case "alphabet":
+          return "alphabet";
+        case "root":
+          return "the main folder";
+      }
+    })
+    .join(" then ");
+}
 
-function organizationPresetKey(plan: OrganizationPlan) {
-  return plan.groupBy.join("-");
+function explicitlyRequestsFolderRemoval(content: string) {
+  if (
+    /\b(?:(?:do not|don't|dont)\s+(?:delete|remove)|without\s+(?:deleting|removing)|(?:keep|leave)\s+(?:the\s+)?)\b[^.!?]{0,35}\b(?:folders?|director(?:y|ies))\b/i.test(
+      content,
+    )
+  ) {
+    return false;
+  }
+
+  return /\b(?:delete|remove|clean up)\b[^.!?]{0,60}\b(?:empty\s+)?(?:subfolders?|folders?|director(?:y|ies))\b/i.test(
+    content,
+  );
 }
 
 export function FilesystemProposalCard({
@@ -113,11 +126,21 @@ export function FilesystemProposalCard({
       const completedAt = Date.now();
       setAppliedAt(completedAt);
       setResultMessage(result.message);
-      onApproved?.({
-        ...proposal,
-        approved: true,
-        appliedAt: completedAt,
-      });
+      try {
+        await onApproved?.({
+          ...proposal,
+          approved: true,
+          appliedAt: completedAt,
+        });
+      } catch (refreshError) {
+        const detail =
+          refreshError instanceof Error ? refreshError.message : String(refreshError);
+        setError(
+          `The changes were applied, but the folder inventory could not be refreshed${
+            detail ? `: ${detail}` : "."
+          }`,
+        );
+      }
     } catch (caughtError) {
       setError(
         caughtError instanceof Error
@@ -214,30 +237,45 @@ function OrganizationProposalCard({
 }: {
   basePath: string;
   plan: OrganizationPlan;
-  onApplied?: () => void;
+  onApplied?: () => void | Promise<void>;
 }) {
-  const [editedPlan, setEditedPlan] = useState(plan);
   const [preview, setPreview] = useState<OrganizationPreview | null>(null);
-  const [isReviewed, setIsReviewed] = useState(false);
   const [isExecuting, setIsExecuting] = useState(false);
   const [isDismissed, setIsDismissed] = useState(false);
   const [resultMessage, setResultMessage] = useState("");
   const [error, setError] = useState("");
   const [previewRevision, setPreviewRevision] = useState(0);
+  const [executionProgress, setExecutionProgress] = useState<OrganizationProgress | null>(null);
 
   useEffect(() => {
-    setEditedPlan(plan);
-  }, [basePath, plan]);
+    let disposed = false;
+    let stopListening: (() => void) | undefined;
+    const comparableBasePath = basePath.replace(/\\/g, "/").toLocaleLowerCase();
+    void listenForOrganizationProgress((progress) => {
+      if (
+        progress.basePath.replace(/\\/g, "/").toLocaleLowerCase() === comparableBasePath
+      ) {
+        setExecutionProgress(progress);
+      }
+    }).then((unlisten) => {
+      if (disposed) unlisten();
+      else stopListening = unlisten;
+    });
+    return () => {
+      disposed = true;
+      stopListening?.();
+    };
+  }, [basePath]);
 
   useEffect(() => {
     let active = true;
     setPreview(null);
-    setIsReviewed(false);
     setIsExecuting(false);
     setIsDismissed(false);
     setResultMessage("");
     setError("");
-    void previewOrganizationPlan(basePath, editedPlan)
+    setExecutionProgress(null);
+    void previewOrganizationPlan(basePath, plan)
       .then((result) => {
         if (active) setPreview(result);
       })
@@ -253,7 +291,7 @@ function OrganizationProposalCard({
     return () => {
       active = false;
     };
-  }, [basePath, editedPlan, previewRevision]);
+  }, [basePath, plan, previewRevision]);
 
   const hasReviewableChanges = Boolean(
     preview && (preview.plannedMoves > 0 || preview.plannedFolderRemovals > 0),
@@ -262,17 +300,24 @@ function OrganizationProposalCard({
   const applyPlan = useCallback(async () => {
     if (
       !preview ||
-      !isReviewed ||
       isExecuting ||
       !hasReviewableChanges ||
       resultMessage
     ) return;
     setIsExecuting(true);
     setError("");
+    setExecutionProgress({
+      basePath,
+      phase: "moving",
+      processed: 0,
+      total: preview.plannedMoves,
+      moved: 0,
+      failed: 0,
+    });
     try {
       const result = await executeOrganizationPlan(
         basePath,
-        editedPlan,
+        plan,
         preview.fingerprint,
       );
       if (!result.success) {
@@ -280,30 +325,50 @@ function OrganizationProposalCard({
         return;
       }
       setResultMessage(result.message);
-      onApplied?.();
+      setExecutionProgress(null);
+      try {
+        await onApplied?.();
+      } catch (refreshError) {
+        const detail =
+          refreshError instanceof Error ? refreshError.message : String(refreshError);
+        setError(
+          `The organization finished, but the folder inventory could not be refreshed${
+            detail ? `: ${detail}` : "."
+          }`,
+        );
+      }
     } catch (caughtError) {
       const message =
         caughtError instanceof Error
           ? caughtError.message
           : String(caughtError || "The organization plan could not be applied.");
       setError(message);
-      if (/folder changed after the preview/i.test(message)) {
-        setIsReviewed(false);
-        setPreviewRevision((current) => current + 1);
-      }
     } finally {
       setIsExecuting(false);
     }
-  }, [basePath, editedPlan, hasReviewableChanges, isExecuting, isReviewed, onApplied, preview, resultMessage]);
+  }, [basePath, hasReviewableChanges, isExecuting, onApplied, plan, preview, resultMessage]);
 
   if (isDismissed) return null;
+
+  if (resultMessage) {
+    return (
+      <section className="filesystem-proposal filesystem-proposal-complete">
+        <span className="filesystem-complete-mark" aria-hidden="true">&check;</span>
+        <div>
+          <strong>Folder updated</strong>
+          <p>{resultMessage}</p>
+          {error ? <p className="filesystem-proposal-status is-error">{error}</p> : null}
+        </div>
+      </section>
+    );
+  }
 
   return (
     <section className="filesystem-proposal">
       <div className="filesystem-proposal-heading">
         <div>
-          <span className="filesystem-proposal-eyebrow">Command review</span>
-          <h3>Organize the complete folder</h3>
+          <span className="filesystem-proposal-eyebrow">Ready for review</span>
+          <h3>Organize this folder</h3>
         </div>
         <span className="filesystem-proposal-count">
           {preview
@@ -312,90 +377,48 @@ function OrganizationProposalCard({
         </span>
       </div>
 
-      {editedPlan.reasoning &&
-      !isContradictoryOrganizationReasoning(editedPlan.reasoning, editedPlan) ? (
-        <p className="filesystem-proposal-reasoning">{editedPlan.reasoning}</p>
+      {plan.reasoning &&
+      !isContradictoryOrganizationReasoning(plan.reasoning, plan) ? (
+        <p className="filesystem-proposal-reasoning">{plan.reasoning}</p>
       ) : null}
-      <div className="filesystem-plan-editor">
-        <label>
-          <span>Organization</span>
-          <select
-            value={organizationPresetKey(editedPlan)}
-            disabled={isExecuting}
-            onChange={(event) => {
-              const preset = organizationPresets.find(
-                (candidate) => candidate.key === event.currentTarget.value,
-              );
-              if (!preset) return;
-              setEditedPlan((current) => ({
-                ...current,
-                groupBy: [...preset.groupBy],
-                reasoning: "",
-              }));
-            }}
-          >
-            {organizationPresets.map((preset) => (
-              <option key={preset.key} value={preset.key}>{preset.label}</option>
-            ))}
-          </select>
-        </label>
-        <label className="filesystem-plan-cleanup">
-          <input
-            type="checkbox"
-            checked={editedPlan.removeEmptyFolders}
-            disabled={isExecuting}
-            onChange={(event) => {
-              const removeEmptyFolders = event.currentTarget.checked;
-              setEditedPlan((current) => ({
-                ...current,
-                removeEmptyFolders,
-                reasoning: "",
-              }));
-            }}
-          />
-          <span>Remove folders only after they are empty</span>
-        </label>
-      </div>
-      <p className="filesystem-proposal-reasoning">
-        {editedPlan.groupBy[0] === "root"
-          ? "Destination: the selected folder's main level."
-          : `Hierarchy: ${editedPlan.groupBy.join(" then ")}.`} The app expands this
-        command locally; filenames are not returned as a giant model-generated
-        action list. {editedPlan.removeEmptyFolders
-          ? "Cleanup can remove only directories that are empty after the moves."
-          : "Existing folders are left untouched."}
+      <p className="filesystem-plan-summary">
+        <strong>
+          {plan.groupBy[0] === "root"
+            ? `Move ${preview?.plannedMoves ?? "all"} files to the main folder`
+            : `Organize ${preview?.plannedMoves ?? "the"} files by ${organizationLabel(plan)}`}
+        </strong>
+        <span>
+          {plan.removeEmptyFolders
+            ? `Afterward, remove ${preview?.plannedFolderRemovals ?? "the"} subfolders confirmed empty.`
+            : "Existing folders will be left in place."}
+        </span>
       </p>
-
       {preview ? (
         <>
-          <div className="filesystem-plan-stats">
-            <span>{preview.totalFiles} files scanned</span>
-            <span>{preview.unchangedFiles} already organized</span>
-            <span>{preview.batchCount} execution batches</span>
-            {preview.plannedFolderRemovals ? (
-              <span>{preview.plannedFolderRemovals} empty folders to remove</span>
-            ) : null}
-            {preview.conflicts ? <span>{preview.conflicts} conflicts skipped</span> : null}
-            {Object.entries(preview.typeBreakdown).map(([fileType, count]) => (
-              <span key={fileType}>{fileType}: {count}</span>
-            ))}
-          </div>
-          <ol className="filesystem-action-list">
-            {preview.sampleActions.map((action, index) => (
-              <li
-                key={`${action.type}-${index}-${getActionLabel(action)}`}
-                className={`filesystem-action filesystem-action-${action.type}`}
-              >
-                <span className="filesystem-action-number">{index + 1}</span>
-                <span>{getActionLabel(action)}</span>
-              </li>
-            ))}
-          </ol>
-          {preview.plannedMoves > preview.sampleActions.length ? (
-            <p className="filesystem-proposal-reasoning">
-              Showing {preview.sampleActions.length} examples. The same reviewed rule
-              covers {preview.plannedMoves} moves.
-            </p>
+          <p className="filesystem-plan-facts">
+            {preview.totalFiles.toLocaleString()} files currently eligible
+            {preview.collisionRenames
+              ? ` / ${preview.collisionRenames.toLocaleString()} duplicate names will be safely numbered`
+              : " / no duplicate names"}
+          </p>
+          {preview.sampleActions.length ? (
+            <details className="filesystem-plan-options">
+              <summary>Review a few example moves</summary>
+              <ol className="filesystem-action-list">
+                {preview.sampleActions.slice(0, 4).map((action, index) => (
+                  <li
+                    key={`${action.type}-${index}-${getActionLabel(action)}`}
+                    className={`filesystem-action filesystem-action-${action.type}`}
+                  >
+                    <span className="filesystem-action-number">{index + 1}</span>
+                    <span>{getActionLabel(action)}</span>
+                  </li>
+                ))}
+              </ol>
+              <p className="filesystem-proposal-reasoning">
+                These are examples only. One reviewed rule covers all {preview.plannedMoves} moves.
+              </p>
+            </details>
           ) : null}
         </>
       ) : null}
@@ -417,38 +440,50 @@ function OrganizationProposalCard({
           {" will be left where they are. The other moves are safe to apply."}
         </p>
       ) : null}
+      {isExecuting && executionProgress ? (
+        <div className="filesystem-execution-progress" role="status" aria-live="polite">
+          <div>
+            <strong>
+              {executionProgress.phase === "cleaning"
+                ? "Checking for empty folders…"
+                : `Moving ${executionProgress.processed.toLocaleString()} of ${executionProgress.total.toLocaleString()} files…`}
+            </strong>
+            <span>{Math.round((executionProgress.processed / Math.max(1, executionProgress.total)) * 100)}%</span>
+          </div>
+          <progress
+            max={Math.max(1, executionProgress.total)}
+            value={executionProgress.processed}
+          />
+          <small>You can keep watching this card; files are being changed directly in the selected folder.</small>
+          {executionProgress.failed ? (
+            <small>
+              {executionProgress.failed.toLocaleString()} inaccessible or changing files will remain safely in place; the organizer is continuing.
+            </small>
+          ) : null}
+        </div>
+      ) : null}
       {preview && !hasReviewableChanges && !preview.conflicts ? (
         <p className="filesystem-proposal-status">
           No files or empty folders need changes for this plan.
         </p>
       ) : null}
-      {resultMessage ? (
-        <p className="filesystem-proposal-status is-success">{resultMessage}</p>
-      ) : null}
-
-      {preview && !resultMessage ? (
+      {preview ? (
         <>
-          <label className="filesystem-review-check">
-            <input
-              type="checkbox"
-              checked={isReviewed}
-              disabled={isExecuting || !hasReviewableChanges}
-              onChange={(event) => setIsReviewed(event.target.checked)}
-            />
-            <span>I reviewed the destinations, conflicts, folder cleanup, and sample moves.</span>
-          </label>
           <div className="filesystem-proposal-actions">
             <button
               type="button"
               className="filesystem-apply-button"
               disabled={
-                !isReviewed ||
                 isExecuting ||
                 !hasReviewableChanges
               }
               onClick={() => void applyPlan()}
             >
-              {isExecuting ? "Applying batches..." : "Apply organization plan"}
+              {isExecuting
+                ? "Organizing..."
+                : plan.removeEmptyFolders
+                  ? "Organize files and remove empty folders"
+                  : "Organize files"}
             </button>
             <button
               type="button"
@@ -467,12 +502,14 @@ function OrganizationProposalCard({
 
 type ProposalParserProps = {
   content: string;
+  requestContent?: string;
   basePath: string;
-  onApplied?: () => void;
+  onApplied?: () => void | Promise<void>;
 };
 
 export function FilesystemProposalParser({
   content,
+  requestContent = "",
   basePath,
   onApplied,
 }: ProposalParserProps) {
@@ -480,10 +517,13 @@ export function FilesystemProposalParser({
     () => parseProposedActionsFromContent(content),
     [content],
   );
-  const organizationPlan = useMemo(
-    () => parseOrganizationPlanFromContent(content),
-    [content],
-  );
+  const organizationPlan = useMemo(() => {
+    const parsed = parseOrganizationPlanFromContent(content);
+    if (!parsed || !explicitlyRequestsFolderRemoval(requestContent)) {
+      return parsed;
+    }
+    return { ...parsed, removeEmptyFolders: true };
+  }, [content, requestContent]);
   const hasCommandBlock = useMemo(
     () => containsSpotlightCommandBlock(content),
     [content],

@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import type {
   FilesystemAction,
   FilesystemProposal,
@@ -10,6 +11,23 @@ export type FilesystemOperationResult = {
   success: boolean;
   message: string;
 };
+
+export type OrganizationProgress = {
+  basePath: string;
+  phase: "moving" | "cleaning" | "complete";
+  processed: number;
+  total: number;
+  moved: number;
+  failed: number;
+};
+
+export function listenForOrganizationProgress(
+  handler: (progress: OrganizationProgress) => void,
+): Promise<UnlistenFn> {
+  return listen<OrganizationProgress>("organization-progress", (event) => {
+    handler(event.payload);
+  });
+}
 
 const maximumProposedActions = 250;
 const maximumPathLength = 500;
@@ -87,6 +105,31 @@ function commandLines(block: string) {
     .filter(Boolean);
 }
 
+function recoverPlainCommandBlock(content: string) {
+  if (containsSpotlightCommandBlock(content)) return null;
+
+  const commandLikeLines = content
+    // Local models sometimes choose a generic Markdown fence even when they
+    // understood the command. Remove only the fence markers so exact command
+    // lines remain reviewable; prose and malformed commands are still ignored.
+    .replace(/^```[^\r\n]*$/gm, "")
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .map((line) =>
+      line
+        .trim()
+        .replace(/^(?:[-*+]\s+|\d+[.)]\s+)/, "")
+        .trim(),
+    )
+    .filter((line) =>
+      /^(?:organize|flatten|cleanup-empty-|remove-empty-|keep-empty-|move\s+|copy\s+|rename\s+|create-folder\s+|delete\s+)/i.test(
+        line,
+      ),
+    );
+
+  return commandLikeLines.length ? commandLikeLines.join("\n") : null;
+}
+
 function parseOrganizationCommandBlock(block: string): OrganizationPlan | null {
   const lines = commandLines(block);
   const organizationLines = lines.filter((line) => /^(?:organize|flatten)\s+/i.test(line));
@@ -106,6 +149,11 @@ function parseOrganizationCommandBlock(block: string): OrganizationPlan | null {
       case "organize-by-file-type":
       case "organize-by-filetype":
         return ["fileType"] as const;
+      case "organize-category":
+      case "organize-categories":
+      case "organize-by-category":
+      case "organize-by-categories":
+        return ["category"] as const;
       case "organize-alphabet":
       case "organize-by-alphabet":
         return ["alphabet"] as const;
@@ -115,6 +163,12 @@ function parseOrganizationCommandBlock(block: string): OrganizationPlan | null {
       case "organize-alphabet-then-file-type":
       case "organize-alphabet-then-filetype":
         return ["alphabet", "fileType"] as const;
+      case "organize-category-then-alphabet":
+      case "organize-categories-then-alphabet":
+        return ["category", "alphabet"] as const;
+      case "organize-alphabet-then-category":
+      case "organize-alphabet-then-categories":
+        return ["alphabet", "category"] as const;
       default:
         return null;
     }
@@ -252,6 +306,12 @@ export function parseOrganizationPlanFromContent(
     if (plan) return plan;
   }
 
+  const recoveredCommands = recoverPlainCommandBlock(content);
+  if (recoveredCommands) {
+    const recoveredPlan = parseOrganizationCommandBlock(recoveredCommands);
+    if (recoveredPlan) return recoveredPlan;
+  }
+
   // Compatibility only: older saved conversations can still render their
   // reviewed plans, but new model instructions never request JSON.
   for (const match of content.matchAll(legacyJsonBlockPattern)) {
@@ -265,7 +325,10 @@ export function parseOrganizationPlanFromContent(
         ...new Set(
           rawPlan.groupBy.filter(
             (group): group is OrganizationPlan["groupBy"][number] =>
-              group === "fileType" || group === "alphabet" || group === "root",
+              group === "fileType" ||
+              group === "category" ||
+              group === "alphabet" ||
+              group === "root",
           ),
         ),
       ];
@@ -298,6 +361,12 @@ export function parseProposedActionsFromContent(
   for (const match of content.matchAll(spotlightCommandBlockPattern)) {
     const proposal = parseActionCommandBlock(match[1]);
     if (proposal) return proposal;
+  }
+
+  const recoveredCommands = recoverPlainCommandBlock(content);
+  if (recoveredCommands) {
+    const recoveredProposal = parseActionCommandBlock(recoveredCommands);
+    if (recoveredProposal) return recoveredProposal;
   }
 
   // Compatibility only for proposals already stored in chat history.

@@ -1065,12 +1065,44 @@ h3 {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px 14px;
+  padding: 11px 14px;
   margin-bottom: 12px;
   border-radius: 14px;
   background: rgba(138, 180, 248, 0.12);
   color: var(--text);
-  font-size: 0.92rem;
+  font-size: 0.84rem;
+}
+
+.response-activity-pulse {
+  width: 9px;
+  height: 9px;
+  flex: 0 0 9px;
+  border-radius: 999px;
+  background: #8ab4f8;
+  box-shadow: 0 0 0 0 rgba(138, 180, 248, 0.5);
+  animation: response-activity-pulse 1.6s ease-out infinite;
+}
+
+.response-activity-copy {
+  display: grid;
+  gap: 1px;
+}
+
+.response-activity-copy strong {
+  font-size: 0.72rem;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.response-activity-copy span {
+  color: var(--muted);
+}
+
+@keyframes response-activity-pulse {
+  70%,
+  100% {
+    box-shadow: 0 0 0 8px rgba(138, 180, 248, 0);
+  }
 }
 
 .cancel-button:hover {
@@ -1934,47 +1966,63 @@ h3 {
   line-height: 1.45;
 }
 
-.filesystem-plan-editor {
-  margin-top: 12px;
+.filesystem-plan-summary {
+  margin: 12px 0 10px;
+  padding: 11px 12px;
   display: grid;
-  grid-template-columns: minmax(190px, 1fr) minmax(220px, 1fr);
-  gap: 10px;
+  gap: 3px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--surface-raised) 76%, transparent);
 }
 
-.filesystem-plan-editor label {
-  display: grid;
-  gap: 6px;
+.filesystem-plan-summary span {
   color: var(--muted);
-  font-size: 0.72rem;
+  font-size: 0.76rem;
 }
 
-.filesystem-plan-editor select {
-  width: 100%;
-  min-height: 36px;
-  padding: 0 10px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  color: var(--text);
-  background: var(--surface-raised);
+.filesystem-plan-facts {
+  margin: 9px 0 0;
+  color: var(--muted);
+  font-size: 0.74rem;
 }
 
-.filesystem-plan-cleanup {
-  grid-template-columns: auto 1fr;
-  align-items: center;
-  align-content: center;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 9px;
+.filesystem-proposal-complete {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 12px 14px;
+  border-color: color-mix(in srgb, #6fd39a 52%, var(--border));
+  background: color-mix(in srgb, #6fd39a 8%, var(--surface-raised));
 }
 
-.filesystem-plan-cleanup input {
-  margin: 0;
+.filesystem-proposal-complete p {
+  margin: 2px 0 0;
+  color: var(--muted);
+  font-size: 0.76rem;
 }
 
-@media (max-width: 680px) {
-  .filesystem-plan-editor {
-    grid-template-columns: 1fr;
-  }
+.filesystem-complete-mark {
+  display: grid;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 22px;
+  place-items: center;
+  border-radius: 999px;
+  color: #07170e;
+  background: #6fd39a;
+  font-weight: 800;
+}
+
+.filesystem-plan-options {
+  margin-top: 10px;
+}
+
+.filesystem-plan-options summary {
+  width: fit-content;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.74rem;
 }
 
 .filesystem-plan-stats {
@@ -2050,6 +2098,42 @@ h3 {
 .filesystem-proposal-status.is-success {
   border-color: color-mix(in srgb, #62d99b 48%, var(--border));
   color: color-mix(in srgb, #62d99b 82%, var(--text));
+}
+
+.filesystem-execution-progress {
+  margin: 0 0 12px;
+  padding: 10px 11px;
+  display: grid;
+  gap: 7px;
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, var(--border));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface-raised));
+}
+
+.filesystem-execution-progress > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.76rem;
+}
+
+.filesystem-execution-progress > div span,
+.filesystem-execution-progress small {
+  color: var(--muted);
+}
+
+.filesystem-execution-progress progress {
+  width: 100%;
+  height: 7px;
+  overflow: hidden;
+  border: 0;
+  border-radius: 999px;
+  accent-color: var(--accent);
+}
+
+.filesystem-execution-progress small {
+  font-size: 0.68rem;
 }
 
 .filesystem-review-check {
